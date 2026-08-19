@@ -1,6 +1,6 @@
 # SIC Attendance for Raspberry Pi 4
 
-This folder is the self-contained Raspberry Pi 4 deployment for three-camera, vote-confirmed attendance. The Pi performs capture, motion triggering, face detection, recognition, enrollment, voting, and biometric storage. A local PC is not part of the runtime path.
+This is the self-contained Raspberry Pi 4 deployment for three-camera, vote-confirmed attendance. The Pi performs capture, motion triggering, face detection, recognition, enrollment, voting, and biometric storage. A local PC is not part of the runtime path.
 
 ## Decision rules
 
