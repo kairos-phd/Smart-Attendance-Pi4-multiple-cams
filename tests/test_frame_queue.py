@@ -28,6 +28,20 @@ class FairFrameQueueTests(unittest.TestCase):
         self.assertEqual(int(frames.get().frame[0, 0]), 2)
         self.assertEqual(frames.get().camera_id, "c2")
 
+    def test_non_divisible_capacity_is_distributed_without_exceeding_total(self) -> None:
+        frames = FairFrameQueue(["c1", "c2", "c3"], 5)
+
+        for marker in range(3):
+            frames.put(frame("c1", marker))
+            frames.put(frame("c2", marker + 10))
+            frames.put(frame("c3", marker + 20))
+
+        self.assertEqual(frames.qsize(), 5)
+        drained = [frames.get() for _ in range(5)]
+        self.assertEqual([item.camera_id for item in drained].count("c1"), 2)
+        self.assertEqual([item.camera_id for item in drained].count("c2"), 2)
+        self.assertEqual([item.camera_id for item in drained].count("c3"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

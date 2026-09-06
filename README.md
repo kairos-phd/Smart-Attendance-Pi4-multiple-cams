@@ -1,14 +1,14 @@
 # SIC Attendance for Raspberry Pi 4
 
-This is the self-contained Raspberry Pi 4 deployment for three-camera, vote-confirmed attendance. The Pi performs capture, motion triggering, face detection, recognition, enrollment, voting, and biometric storage. A local PC is not part of the runtime path.
+This folder is the self-contained Raspberry Pi 4 deployment for realtime biometric attendance. The Pi performs capture, optional motion triggering, face detection, recognition, enrollment, decision metadata, and biometric storage. A local PC is not part of the runtime path.
 
 ## Decision rules
 
-- Exactly three configured cameras.
-- Attendance requires matching observations from at least two distinct cameras inside a configurable time window.
-- Repeated frames from one camera count as one vote.
-- Weak, ambiguous, or conflicting identities do not create attendance.
-- When fewer than two cameras are available, automatic confirmation must not be trusted.
+- One or more uniquely identified cameras may be configured.
+- Each detected face produces an independent biometric observation.
+- Attendance requires similarity, margin, detection-confidence, and face-quality thresholds to pass.
+- Repeated accepted observations are suppressed by the global per-user attendance cooldown.
+- Camera ID is provenance and health metadata, not a quorum requirement.
 - Images remain `uint8` JPEG data; face embeddings are symmetric per-vector INT8 BLOBs.
 - Biometric images, embeddings, and datasets remain on the Pi microSD.
 - Model INT8 conversion is accepted only after a target-Pi benchmark and identity accuracy evaluation.
@@ -17,21 +17,20 @@ This is the self-contained Raspberry Pi 4 deployment for three-camera, vote-conf
 
 | Path | Purpose |
 | --- | --- |
-| `src/pi4_attendance` | Runtime, camera queue, inference, voting, SQLite, and protected API |
+| `src/pi4_attendance` | Runtime, camera queue, inference, recognition policy, SQLite, and protected API |
 | `src/pi4_attendance/tools` | Model preparation and target-Pi benchmark tools |
 | `models` | Licensing and reproducible model-generation instructions; no restricted weights |
 | `scripts` | Installation, hardware verification, and systemd installation |
 | `systemd` | Hardened boot service |
-| `tests` | INT8, voting, and local-storage tests |
+| `tests` | Recognition, image-boundary, model, storage, API, and migration tests |
 | `docs` | Architecture, deployment, calibration, storage, security, and acceptance guidance |
 
 ## Quick deployment
 
 ```bash
-git clone <YOUR_REPOSITORY_URL> sic-attendance
-cd sic-attendance/PI4
-bash scripts/verify_hardware.sh
-bash scripts/install.sh
+git clone https://github.com/kairos-phd/Smart-Attendance-Pi4-multiple-cams.git sic-attendance
+cd sic-attendance
+bash scripts/bootstrap_pi.sh
 nano .env
 ```
 
@@ -39,7 +38,7 @@ Place at least 20 representative, consented calibration images under the microSD
 
 ```bash
 .venv/bin/sic-pi4-prepare-models \
-  --model-root /opt/sic-attendance/models \
+  --model-root /opt/sic-attendance \
   --calibration-dir /var/lib/sic-attendance/calibration \
   --accept-insightface-noncommercial-license
 ```
@@ -48,7 +47,7 @@ Benchmark on the Pi:
 
 ```bash
 .venv/bin/sic-pi4-benchmark \
-  --model-root /opt/sic-attendance/models \
+  --model-root /opt/sic-attendance \
   --dataset /var/lib/sic-attendance/calibration
 ```
 
@@ -59,13 +58,14 @@ Keep `MODEL_PACK=pi4_fp32` unless the INT8 benchmark and recognition evaluation 
 .venv/bin/sic-pi4
 ```
 
-Install at boot only after all three cameras and enrollment have been verified:
+Install at boot only after every configured camera and enrollment have been verified:
 
 ```bash
-bash scripts/install_systemd.sh
-sudo reboot
+sudo systemctl enable --now sic-pi4-attendance
 sudo systemctl status sic-pi4-attendance
 journalctl -u sic-pi4-attendance -f
+sudo reboot
+sudo systemctl status sic-pi4-attendance
 ```
 
 ## Enrollment API
@@ -84,4 +84,4 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 Real face images, `.env`, service credentials, generated model packs, SQLite databases, and benchmark results are ignored by Git.
 
-Read [deployment](docs/DEPLOYMENT.md), [voting](docs/VOTING.md), [model optimization](docs/MODEL_OPTIMIZATION.md), [data storage](docs/DATA_STORAGE.md), and [security](docs/SECURITY.md) before installation.
+Read [deployment](docs/DEPLOYMENT.md), [recognition policy](docs/VOTING.md), [model optimization](docs/MODEL_OPTIMIZATION.md), [data storage](docs/DATA_STORAGE.md), and [security](docs/SECURITY.md) before installation.

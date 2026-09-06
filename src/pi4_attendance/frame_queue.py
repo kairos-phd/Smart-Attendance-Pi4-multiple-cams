@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import queue
 import threading
 import time
@@ -15,8 +14,14 @@ class FairFrameQueue:
     def __init__(self, camera_ids: list[str], total_capacity: int) -> None:
         if not camera_ids:
             raise ValueError("At least one camera is required")
+        if total_capacity < len(camera_ids):
+            raise ValueError("Total capacity must provide at least one slot per camera")
         self._order = list(camera_ids)
-        self._capacity = max(1, math.ceil(total_capacity / len(camera_ids)))
+        base_capacity, extra_slots = divmod(total_capacity, len(camera_ids))
+        self._capacities = {
+            camera_id: base_capacity + (1 if index < extra_slots else 0)
+            for index, camera_id in enumerate(camera_ids)
+        }
         self._queues = {camera_id: deque() for camera_id in camera_ids}
         self._next = 0
         self._condition = threading.Condition()
@@ -27,7 +32,7 @@ class FairFrameQueue:
             target = self._queues.get(candidate.camera_id)
             if target is None:
                 raise ValueError(f"Unknown camera: {candidate.camera_id}")
-            dropped = len(target) >= self._capacity
+            dropped = len(target) >= self._capacities[candidate.camera_id]
             if dropped:
                 target.popleft()
             target.append(candidate)

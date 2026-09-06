@@ -1,11 +1,13 @@
 [Unit]
-Description=SIC three-camera Pi 4 attendance service
+Description=SIC realtime biometric Pi 4 attendance service
 After=local-fs.target network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=REPLACE_USER
+Group=REPLACE_GROUP
+SupplementaryGroups=video
 WorkingDirectory=REPLACE_ROOT
 EnvironmentFile=REPLACE_ROOT/.env
 Environment=PYTHONUNBUFFERED=1
@@ -18,6 +20,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/sic-attendance /opt/sic-attendance/models
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

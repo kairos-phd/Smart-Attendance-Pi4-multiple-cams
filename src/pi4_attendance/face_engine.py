@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from .models import Observation, RegisteredUser
-from .quantization import cosine_int8, normalize_embedding, quantize_embedding
+from .embedding_catalog import EmbeddingCatalog
+from .models import Observation
+from .images import validate_bbox, validate_frame
+from .model_identity import model_identity
+from .quantization import normalize_embedding, quantize_embedding
 
 LOG = logging.getLogger(__name__)
 
@@ -39,34 +43,37 @@ class FaceEngine:
         self.threshold = threshold
         self.margin = margin
         self._app = None
+        self._model_lock = threading.Lock()
         self.model_version = model_pack
+        self.model_label = model_pack
 
     def start(self) -> None:
         from insightface.app import FaceAnalysis
 
-        manifest_path = self.model_root / "models" / self.model_pack / "manifest.json"
-        if manifest_path.exists():
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            self.model_version = str(manifest.get("model_version", self.model_pack))
         self._app = FaceAnalysis(name=self.model_pack, root=str(self.model_root), providers=["CPUExecutionProvider"])
+        identity = model_identity(self.model_root, self.model_pack)
+        self.model_label = identity.label
+        self.model_version = identity.compatibility_key
         self._app.prepare(ctx_id=-1, det_size=(self.det_size, self.det_size))
         LOG.info("Loaded model pack %s (%s)", self.model_pack, self.model_version)
 
     def _faces(self, image: np.ndarray):
         if self._app is None:
             raise RuntimeError("Face engine is not started")
-        return self._app.get(image)
+        with self._model_lock:
+            return self._app.get(image)
 
     def enrollment_embedding(self, images: list[np.ndarray]) -> tuple[np.ndarray, float]:
         embeddings: list[np.ndarray] = []
         for image in images:
+            image = validate_frame(image)
             faces = self._faces(image)
             if len(faces) != 1:
                 raise ValueError("Each enrollment image must contain exactly one clear foreground face")
             face = faces[0]
             if float(face.det_score) < 0.60:
                 raise ValueError("Face detection confidence is too low")
-            bbox = tuple(int(value) for value in face.bbox)
+            bbox = validate_bbox(face.bbox, frame_width=image.shape[1], frame_height=image.shape[0])
             if _face_quality(image, bbox) < 0.35:
                 raise ValueError("An enrollment image is too small, blurry, dark, or overexposed")
             embeddings.append(normalize_embedding(np.asarray(face.normed_embedding, dtype=np.float32)))
@@ -81,40 +88,36 @@ class FaceEngine:
     def recognize(
         self,
         image: np.ndarray,
-        users: list[RegisteredUser],
+        users: EmbeddingCatalog,
         camera_id: str,
         observed_monotonic: float,
         observed_at: datetime,
     ) -> list[Observation]:
+        image = validate_frame(image)
+        if not isinstance(users, EmbeddingCatalog):
+            users = EmbeddingCatalog.from_users(users, self.model_version)
         results: list[Observation] = []
         for face in self._faces(image):
-            bbox = tuple(int(value) for value in face.bbox)
+            try:
+                bbox = validate_bbox(face.bbox, frame_width=image.shape[1], frame_height=image.shape[0])
+            except ValueError:
+                continue
             query_q, query_scale = quantize_embedding(np.asarray(face.normed_embedding, dtype=np.float32))
-            ranked = sorted(
-                (
-                    (cosine_int8(query_q, query_scale, user.embedding_q, user.embedding_scale), user)
-                    for user in users
-                    if user.model_version == self.model_version
-                ),
-                key=lambda pair: pair[0],
-                reverse=True,
-            )
-            best_score, best_user = ranked[0] if ranked else (0.0, None)
-            second_score = ranked[1][0] if len(ranked) > 1 else 0.0
+            best_user, best_score, second_score = users.top_two(query_q, query_scale)
             match_margin = best_score - second_score
-            accepted = best_user if best_score >= self.threshold and match_margin >= self.margin else None
             results.append(
                 Observation(
                     camera_id=camera_id,
                     observed_monotonic=observed_monotonic,
                     observed_at=observed_at,
-                    candidate_user_id=accepted.user_id if accepted else None,
-                    candidate_name=accepted.name if accepted else None,
+                    candidate_user_id=best_user.user_id if best_user else None,
+                    candidate_name=best_user.name if best_user else None,
                     similarity=float(best_score),
                     margin=float(match_margin),
                     detection_score=float(face.det_score),
                     bbox=bbox,
                     quality=_face_quality(image, bbox),
+                    model_version=self.model_version,
                 )
             )
         return results

@@ -9,6 +9,7 @@ import cv2
 
 from .config import CameraConfig, Settings
 from .frame_queue import FairFrameQueue
+from .images import validate_frame
 from .models import FrameCandidate, utc_now
 from .motion import MotionDetector
 
@@ -62,6 +63,7 @@ class CameraWorker(threading.Thread):
                     ok, frame = cap.read()
                     if not ok or frame is None:
                         raise RuntimeError("Camera returned no frame")
+                    frame = validate_frame(frame, normalize_noncontiguous=True)
                     now = time.monotonic()
                     if now - last_trigger >= self.settings.camera_trigger_cooldown_seconds and self.motion.has_activity(frame):
                         last_trigger = now

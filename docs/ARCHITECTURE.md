@@ -2,29 +2,23 @@
 
 ```mermaid
 flowchart LR
-  C1[Camera 1] --> M1[Motion monitor]
-  C2[Camera 2] --> M2[Motion monitor]
-  C3[Camera 3] --> M3[Motion monitor]
-  M1 --> Q[Bounded candidate queue]
-  M2 --> Q
-  M3 --> Q
+  C[One or more cameras] --> M[Optional motion/rate trigger]
+  M --> Q[Exact-capacity fair frame queue]
   Q --> AI[SCRFD and ArcFace on Pi]
-  AI --> O[Integer observation metadata]
-  O --> V[Temporal vote coordinator]
-  V -->|2 distinct cameras agree| A[Attendance]
-  V -->|weak conflict or no quorum| U[Unknown event]
+  AI --> O[Biometric observation metadata]
+  O --> P[Threshold recognition policy]
+  P -->|accepted and outside cooldown| A[Attendance]
+  P -->|rejected| U[Unknown face crop]
   A --> DB[(microSD SQLite)]
   U --> DB
   API[Protected enrollment API] --> AI
   API --> DB
 ```
 
-The inference worker is deliberately single-consumer by default. Camera capture remains concurrent, while bounded queuing prevents the old behavior in which an event was immediately discarded whenever another inference held the model lock. Queue pressure is counted and persisted as camera health metadata.
+The inference worker is deliberately single-consumer by default. Camera capture remains concurrent, while an exact-capacity fair queue prevents camera starvation and replaces stale same-camera frames under pressure. Queue age, inference latency, dropped frames, and camera health are exposed by `/health`.
 
-Enrollment and recognition share one model instance and lock. This avoids loading a second model copy into the Pi's limited memory and guarantees that enrollment embeddings use the same model version as recognition.
+Enrollment and recognition share one model instance and lock. Active compatible embeddings are loaded into an immutable RAM catalog and refreshed after enrollment or status changes. The compatibility key fingerprints the actual ONNX bytes and manifest contract.
 
 SQLite is authoritative. When `CLOUD_SUMMARY_ENABLED=true`, Firebase receives only camera health and confirmed attendance summaries. The cloud writer never uploads enrollment images, unknown images, embeddings, or calibration data.
 
-## Current operational assumption
-
-The vote window models one person passing through the monitored zone at a time. Simultaneous people require cross-camera tracking or a physical single-file entrance. Do not claim multi-person cross-camera association until that extension has been implemented and tested.
+Each face is decided independently. Multiple faces in a frame do not share a session or identity vote. This policy is not liveness detection; production spoof resistance still requires a separately validated control.

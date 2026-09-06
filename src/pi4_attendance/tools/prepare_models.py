@@ -17,6 +17,20 @@ from onnxruntime.quantization.shape_inference import quant_pre_process
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
 
+def model_role(model_path: Path) -> str:
+    name = model_path.stem.lower()
+    if name.startswith("det_") or "scrfd" in name:
+        return "detector"
+    if "w600k" in name or "glintr" in name or "arcface" in name:
+        return "recognizer"
+    return "auxiliary"
+
+
+def should_quantize(model_path: Path) -> bool:
+    """Full camera frames are representative only for detector calibration."""
+    return model_role(model_path) == "detector"
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -34,10 +48,20 @@ def input_spec(model_path: Path) -> tuple[str, int, int]:
     return model_input.name, height, width
 
 
-def preprocess(image: np.ndarray, height: int, width: int) -> np.ndarray:
-    resized = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
-    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32)
-    return np.transpose((rgb - 127.5) / 128.0, (2, 0, 1))[None, ...]
+def detector_preprocess(image: np.ndarray, height: int, width: int) -> np.ndarray:
+    image_ratio = image.shape[0] / image.shape[1]
+    model_ratio = height / width
+    if image_ratio > model_ratio:
+        resized_height = height
+        resized_width = int(height / image_ratio)
+    else:
+        resized_width = width
+        resized_height = int(width * image_ratio)
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    canvas[:resized_height, :resized_width] = cv2.resize(image, (resized_width, resized_height))
+    return cv2.dnn.blobFromImage(
+        canvas, 1.0 / 128.0, (width, height), (127.5, 127.5, 127.5), swapRB=True
+    )
 
 
 class ImageCalibrationReader(CalibrationDataReader):
@@ -49,7 +73,7 @@ class ImageCalibrationReader(CalibrationDataReader):
                 continue
             image = cv2.imread(str(path))
             if image is not None:
-                samples.append({name: preprocess(image, height, width)})
+                samples.append({name: detector_preprocess(image, height, width)})
             if len(samples) >= limit:
                 break
         if len(samples) < 20:
@@ -87,10 +111,9 @@ def prepare(args: argparse.Namespace) -> None:
 
         if args.calibration_dir:
             target = int8_dir / source.name
-            # Quantize the CNN detector and recognizer; auxiliary landmark/attribute models stay optimized FP32.
-            lower_name = source.stem.lower()
-            is_primary = lower_name.startswith("det_") or "scrfd" in lower_name or "w600k" in lower_name
-            if is_primary:
+            # Full-frame calibration is valid for the detector. Recognition
+            # quantization requires separately aligned 112x112 face crops.
+            if should_quantize(source):
                 reader = ImageCalibrationReader(optimized, args.calibration_dir.resolve(), args.calibration_limit)
                 quantize_static(
                     str(optimized),
@@ -104,7 +127,13 @@ def prepare(args: argparse.Namespace) -> None:
                 onnx.checker.check_model(onnx.load(str(target)))
             else:
                 shutil.copy2(optimized, target)
-            int8_files.append({"name": target.name, "sha256": sha256(target), "bytes": target.stat().st_size})
+            int8_files.append({
+                "name": target.name,
+                "sha256": sha256(target),
+                "bytes": target.stat().st_size,
+                "role": model_role(source),
+                "quantized": should_quantize(source),
+            })
 
     fp32_manifest = {
         "model_version": f"{args.source_pack}-ort-fp32-v1",

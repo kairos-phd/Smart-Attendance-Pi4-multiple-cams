@@ -11,4 +11,8 @@
 - Protect SSH with keys, disable password login where practical, and keep Raspberry Pi OS updated.
 - Treat physical theft of the microSD as a data breach risk. Use an encrypted partition or application-level encryption when required by policy.
 
-Voting is not liveness detection. Do not represent the system as spoof-proof without separate anti-spoof testing.
+Biometric threshold matching is not liveness detection. Do not represent the system as spoof-proof without separate anti-spoof testing.
+
+Enrollment accepts 3–8 static JPEG, PNG, or WebP images, up to 8 MiB each and 32 MiB combined. Before OpenCV decoding, the handler checks every compressed file size, MIME/signature agreement, image header dimensions (at most 4096 per axis and 4,194,304 pixels per image), and the 16,777,216-pixel batch limit. Animated WebP and inconsistent WebP canvas/frame sizes are rejected. Decoded dimensions must agree with the header, allowing an axis swap for EXIF orientation.
+
+FastAPI/Starlette parses and may spool multipart files before this handler runs. These checks bound application reads and image decoding; they do not reject large bodies before framework spooling. Configure a request-body size limit at the reverse proxy to bound incoming multipart traffic, including multipart overhead.

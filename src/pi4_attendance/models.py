@@ -41,17 +41,24 @@ class Observation:
     detection_score: float
     bbox: tuple[int, int, int, int]
     quality: float
+    model_version: str
     observation_id: str = field(default_factory=lambda: uuid4().hex)
 
 
 @dataclass(frozen=True)
-class VoteDecision:
-    session_id: str
+class RecognitionDecision:
+    observation_id: str
     status: str
     user_id: str | None
     name: str | None
-    confidence: float
-    camera_ids: tuple[str, ...]
+    camera_id: str
+    observed_at: datetime
+    similarity: float
+    margin: float
+    detection_score: float
+    quality: float
+    bbox: tuple[int, int, int, int]
+    model_version: str
     reason: str
     decided_at: datetime = field(default_factory=utc_now)
 

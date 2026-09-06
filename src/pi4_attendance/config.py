@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,8 +40,8 @@ class Settings:
     face_det_size: int
     match_threshold: float
     match_margin: float
-    vote_window_seconds: float
-    vote_required_cameras: int
+    min_detection_score: float
+    min_face_quality: float
     attendance_cooldown_seconds: int
     save_unknown_images: bool
     unknown_retention_days: int
@@ -58,19 +59,20 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         load_dotenv()
+        camera_count = int(os.getenv("CAMERA_COUNT", "3"))
         cameras = tuple(
             CameraConfig(
                 os.getenv(f"CAMERA_{number}_ID", f"camera-{number}"),
                 os.getenv(f"CAMERA_{number}_NAME", f"Camera {number}"),
                 _source(os.getenv(f"CAMERA_{number}_SOURCE", str(number - 1))),
             )
-            for number in range(1, 4)
+            for number in range(1, camera_count + 1)
         )
         data_root = Path(os.getenv("DATA_ROOT", "./data")).expanduser().resolve()
         service_account = os.getenv("FIREBASE_SERVICE_ACCOUNT")
         settings = cls(
             data_root=data_root,
-            model_root=Path(os.getenv("MODEL_ROOT", "./models/generated")).expanduser().resolve(),
+            model_root=Path(os.getenv("MODEL_ROOT", ".")).expanduser().resolve(),
             model_pack=os.getenv("MODEL_PACK", "pi4_fp32"),
             pi_id=os.getenv("PI_ID", "pi-classroom-01"),
             cameras=cameras,
@@ -83,8 +85,8 @@ class Settings:
             face_det_size=int(os.getenv("FACE_DET_SIZE", "320")),
             match_threshold=float(os.getenv("MATCH_THRESHOLD", "0.45")),
             match_margin=float(os.getenv("MATCH_MARGIN", "0.06")),
-            vote_window_seconds=float(os.getenv("VOTE_WINDOW_SECONDS", "2.0")),
-            vote_required_cameras=int(os.getenv("VOTE_REQUIRED_CAMERAS", "2")),
+            min_detection_score=float(os.getenv("MIN_DETECTION_SCORE", "0.60")),
+            min_face_quality=float(os.getenv("MIN_FACE_QUALITY", "0.35")),
             attendance_cooldown_seconds=int(os.getenv("ATTENDANCE_COOLDOWN_SECONDS", "300")),
             save_unknown_images=_bool("SAVE_UNKNOWN_IMAGES", True),
             unknown_retention_days=int(os.getenv("UNKNOWN_RETENTION_DAYS", "14")),
@@ -105,12 +107,39 @@ class Settings:
         return settings
 
     def validate(self) -> None:
-        if len(self.cameras) != 3 or len({camera.camera_id for camera in self.cameras}) != 3:
-            raise ValueError("Exactly three uniquely identified cameras are required")
-        if not 2 <= self.vote_required_cameras <= 3:
-            raise ValueError("VOTE_REQUIRED_CAMERAS must be 2 or 3")
-        if self.frame_queue_size < 3:
-            raise ValueError("FRAME_QUEUE_SIZE must be at least 3")
+        if (
+            not self.cameras
+            or any(not camera.camera_id.strip() for camera in self.cameras)
+            or len({camera.camera_id for camera in self.cameras}) != len(self.cameras)
+        ):
+            raise ValueError("At least one uniquely identified camera is required")
+        if self.frame_width <= 0 or self.frame_height <= 0:
+            raise ValueError("FRAME_WIDTH and FRAME_HEIGHT must be positive")
+        if self.monitor_fps <= 0:
+            raise ValueError("MONITOR_FPS must be positive")
+        if self.camera_trigger_cooldown_seconds <= 0:
+            raise ValueError("CAMERA_TRIGGER_COOLDOWN_SECONDS must be positive")
+        if self.face_det_size <= 0:
+            raise ValueError("FACE_DET_SIZE must be positive")
+        if self.frame_queue_size < len(self.cameras):
+            raise ValueError("FRAME_QUEUE_SIZE must provide at least one slot per camera")
+        thresholds = {
+            "MATCH_THRESHOLD": self.match_threshold,
+            "MATCH_MARGIN": self.match_margin,
+            "MIN_DETECTION_SCORE": self.min_detection_score,
+            "MIN_FACE_QUALITY": self.min_face_quality,
+        }
+        for name, value in thresholds.items():
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be finite and between 0 and 1")
+        if self.motion_min_area < 0:
+            raise ValueError("MOTION_MIN_AREA must be nonnegative")
+        if self.attendance_cooldown_seconds < 0:
+            raise ValueError("ATTENDANCE_COOLDOWN_SECONDS must be nonnegative")
+        if self.unknown_retention_days < 0:
+            raise ValueError("UNKNOWN_RETENTION_DAYS must be nonnegative")
+        if not 1 <= self.api_port <= 65535:
+            raise ValueError("API_PORT must be between 1 and 65535")
         if self.api_auth_mode not in {"firebase", "shared_token"}:
             raise ValueError("API_AUTH_MODE must be firebase or shared_token")
         if "*" in self.api_cors_origins:
@@ -121,3 +150,12 @@ class Settings:
             raise ValueError("FIREBASE_SERVICE_ACCOUNT is required when cloud summary sync is enabled")
         if self.api_enabled and self.api_auth_mode == "shared_token" and not self.admin_shared_token:
             raise ValueError("ADMIN_SHARED_TOKEN is required for shared-token API authentication")
+        if self.api_enabled and self.api_auth_mode == "shared_token":
+            token = self.admin_shared_token or ""
+            normalized = token.lower().replace("_", "-")
+            if (
+                len(token) < 32
+                or len(set(token)) < 8
+                or any(marker in normalized for marker in ("replace", "change-me", "changeme", "example", "your-token"))
+            ):
+                raise ValueError("ADMIN_SHARED_TOKEN must be a long random value, not a sample token")

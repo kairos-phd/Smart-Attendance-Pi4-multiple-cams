@@ -6,12 +6,12 @@ On the development machine or Pi, run:
 
 ```bash
 sic-pi4-prepare-models \
-  --model-root /opt/sic-attendance/models \
+  --model-root /opt/sic-attendance \
   --calibration-dir /var/lib/sic-attendance/calibration \
   --accept-insightface-noncommercial-license
 ```
 
-This creates:
+`MODEL_ROOT` is the InsightFace root. Packs are stored under `MODEL_ROOT/models/<pack>`, so this creates:
 
 - `models/pi4_fp32`: graph-optimized FP32 baseline;
 - `models/pi4_int8`: statically calibrated QDQ INT8 candidate;
