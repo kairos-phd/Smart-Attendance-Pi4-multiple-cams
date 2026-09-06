@@ -34,8 +34,6 @@ def _face_quality(image: np.ndarray, bbox: tuple[int, int, int, int]) -> float:
 
 
 class FaceEngine:
-    """InsightFace runtime with locally stored INT8 embeddings and calibrated matching."""
-
     def __init__(self, model_root: Path, model_pack: str, det_size: int, threshold: float, margin: float) -> None:
         self.model_root = model_root
         self.model_pack = model_pack

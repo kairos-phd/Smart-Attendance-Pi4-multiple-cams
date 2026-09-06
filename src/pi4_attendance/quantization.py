@@ -15,7 +15,6 @@ def normalize_embedding(value: np.ndarray) -> np.ndarray:
 
 
 def quantize_embedding(value: np.ndarray) -> tuple[np.ndarray, float]:
-    """Symmetric per-vector INT8 quantization for normalized face embeddings."""
     normalized = normalize_embedding(value)
     max_abs = float(np.max(np.abs(normalized)))
     scale = max(max_abs / INT8_MAX, 1e-8)
@@ -28,7 +27,6 @@ def dequantize_embedding(value: np.ndarray, scale: float) -> np.ndarray:
 
 
 def cosine_int8(query_q: np.ndarray, query_scale: float, stored_q: np.ndarray, stored_scale: float) -> float:
-    """Cosine similarity with INT32 accumulation; scales cancel after normalization."""
     left = np.asarray(query_q, dtype=np.int8).astype(np.int32)
     right = np.asarray(stored_q, dtype=np.int8).astype(np.int32)
     if left.shape != right.shape:

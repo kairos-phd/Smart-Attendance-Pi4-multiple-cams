@@ -159,7 +159,6 @@ def main() -> None:
     reference = run_pack(args.model_root.resolve(), args.reference, args.det_size, samples, args.match_threshold)
     candidate = run_pack(args.model_root.resolve(), args.candidate, args.det_size, samples, args.match_threshold)
     result = {"reference": reference, "candidate": candidate, "comparison": compare(reference, candidate)}
-    # Face embeddings are used only for comparison and are not persisted.
     result["reference"].pop("faces")
     result["candidate"].pop("faces")
     args.output.parent.mkdir(parents=True, exist_ok=True)

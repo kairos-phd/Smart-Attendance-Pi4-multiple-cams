@@ -27,7 +27,6 @@ def model_role(model_path: Path) -> str:
 
 
 def should_quantize(model_path: Path) -> bool:
-    """Full camera frames are representative only for detector calibration."""
     return model_role(model_path) == "detector"
 
 
@@ -90,7 +89,6 @@ def prepare(args: argparse.Namespace) -> None:
     if not source_dir.exists():
         from insightface.app import FaceAnalysis
 
-        # Construction performs InsightFace's standard model-pack acquisition.
         FaceAnalysis(name=args.source_pack, root=str(root), providers=["CPUExecutionProvider"])
     if not source_dir.exists():
         raise FileNotFoundError(f"InsightFace model pack was not found at {source_dir}")
@@ -111,8 +109,6 @@ def prepare(args: argparse.Namespace) -> None:
 
         if args.calibration_dir:
             target = int8_dir / source.name
-            # Full-frame calibration is valid for the detector. Recognition
-            # quantization requires separately aligned 112x112 face crops.
             if should_quantize(source):
                 reader = ImageCalibrationReader(optimized, args.calibration_dir.resolve(), args.calibration_limit)
                 quantize_static(

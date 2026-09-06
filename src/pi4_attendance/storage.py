@@ -18,8 +18,6 @@ SCHEMA_VERSION = 2
 
 
 class PiStore:
-    """MicroSD-backed authoritative store for biometrics, observations, and attendance."""
-
     def __init__(self, data_root: Path) -> None:
         self.data_root = data_root
         self.enrollment_root = data_root / "enrollments"
@@ -331,7 +329,6 @@ class PiStore:
         return result.rowcount == 1
 
     def delete_incomplete_user(self, user_id: str) -> None:
-        """Rollback helper used only when a new enrollment fails before completion."""
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM users WHERE user_id=?", (user_id,))
 
@@ -389,8 +386,6 @@ class PiStore:
             ).fetchone()
             if duplicate:
                 return False
-            # Preserve the legacy attendance schema and its foreign key while new
-            # installs transition from vote sessions to recognition events.
             self._conn.execute(
                 "INSERT OR IGNORE INTO vote_sessions VALUES(?,?,?,?,?,?,?,?)",
                 (

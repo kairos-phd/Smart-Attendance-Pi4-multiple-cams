@@ -17,8 +17,6 @@ LOG = logging.getLogger(__name__)
 
 
 class CameraWorker(threading.Thread):
-    """Independent lightweight capture loop; AI work is handed to a fair shared queue."""
-
     def __init__(
         self,
         camera: CameraConfig,

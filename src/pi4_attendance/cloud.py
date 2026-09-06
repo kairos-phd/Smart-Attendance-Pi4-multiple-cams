@@ -12,8 +12,6 @@ LOG = logging.getLogger(__name__)
 
 
 class CloudSummary:
-    """Optional Firebase writer for metadata-only dashboard summaries."""
-
     def __init__(self, settings: Settings) -> None:
         self.enabled = settings.cloud_summary_enabled
         self.pi_id = settings.pi_id

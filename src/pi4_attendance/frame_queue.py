@@ -9,8 +9,6 @@ from .models import FrameCandidate
 
 
 class FairFrameQueue:
-    """Bounded per-camera queues with round-robin dequeue to prevent camera starvation."""
-
     def __init__(self, camera_ids: list[str], total_capacity: int) -> None:
         if not camera_ids:
             raise ValueError("At least one camera is required")
@@ -27,7 +25,6 @@ class FairFrameQueue:
         self._condition = threading.Condition()
 
     def put(self, candidate: FrameCandidate) -> bool:
-        """Add a frame and return True if an older frame from that camera was replaced."""
         with self._condition:
             target = self._queues.get(candidate.camera_id)
             if target is None:
