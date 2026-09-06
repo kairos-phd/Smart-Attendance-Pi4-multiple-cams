@@ -69,7 +69,11 @@ sudo systemctl stop sic-pi4-attendance
 .venv/bin/sic-pi4 --preview
 ```
 
-The selected camera previews at up to `PREVIEW_FPS=30`; recognition remains bounded by `MONITOR_FPS=4`, motion detection, and the camera trigger cooldown. Recognition starts off. Press `A` to toggle recognition, `1`/`2`/`3` to select a camera, and `Q` or `Esc` to exit. Restart unattended operation afterward with `sudo systemctl start sic-pi4-attendance`.
+The selected camera previews at up to `PREVIEW_FPS=30`; recognition remains bounded by `MONITOR_FPS=4`, motion detection, and the camera trigger cooldown. Recognition starts off. Press `A` to toggle recognition, `1`/`2`/`3` to select a camera, and `Q` or `Esc` to exit.
+
+Press `E` to enroll from the preview, enter the name and student ID, then press `C` for each new view. Capture 3–8 clear views with one face in each frame. Press `Enter` to save or `X` to cancel. Enrollment runs in the background and the overlay shows its result. A successful enrollment is available to recognition immediately.
+
+Restart unattended operation afterward with `sudo systemctl start sic-pi4-attendance`.
 
 Install at boot only after every configured camera and enrollment have been verified:
 

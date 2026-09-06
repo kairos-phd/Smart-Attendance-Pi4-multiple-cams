@@ -64,6 +64,10 @@ sudo systemctl stop sic-pi4-attendance
 .venv/bin/sic-pi4 --preview
 ```
 
-The selected camera requests MJPG at `PREVIEW_FPS=30`; other cameras remain at `MONITOR_FPS`. Press `A` to toggle recognition, `1`/`2`/`3` to switch camera, and `Q` or `Esc` to stop. Run `sudo systemctl start sic-pi4-attendance` afterward to restore unattended operation.
+The selected camera requests MJPG at `PREVIEW_FPS=30`; other cameras remain at `MONITOR_FPS`. Press `A` to toggle recognition, `1`/`2`/`3` to switch camera, and `Q` or `Esc` to stop.
+
+To enroll from the preview, press `E` and enter the name and student ID. Press `C` to capture each new frame, using 3–8 clear views with exactly one face per frame. Press `Enter` to save or `X` to cancel. The overlay reports progress and errors; a successful enrollment enters the active recognition catalog without a restart.
+
+Run `sudo systemctl start sic-pi4-attendance` afterward to restore unattended operation.
 
 Do not enable unattended production use until measured false-accept and false-reject results have been documented.

@@ -85,7 +85,11 @@ class AttendanceRuntime:
         if preview:
             from .preview import PreviewWindow
 
-            self.preview = PreviewWindow(tuple(camera.camera_id for camera in settings.cameras), settings.preview_fps)
+            self.preview = PreviewWindow(
+                tuple(camera.camera_id for camera in settings.cameras),
+                settings.preview_fps,
+                lambda name, student_id, images: self.enroll(name, student_id, images, "hdmi-preview"),
+            )
         else:
             self.preview = None
         self.recognition_enabled = self.preview.recognition_enabled if self.preview is not None else threading.Event()
@@ -414,7 +418,7 @@ class AttendanceRuntime:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SIC Raspberry Pi attendance runtime")
-    parser.add_argument("--preview", action="store_true", help="show HDMI preview; A toggles recognition")
+    parser.add_argument("--preview", action="store_true", help="show HDMI preview with recognition and enrollment controls")
     args = parser.parse_args()
     settings = Settings.from_env()
     logging.basicConfig(
