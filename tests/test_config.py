@@ -44,6 +44,8 @@ def test_runtime_dimensions_and_rates_must_be_positive() -> None:
         {"frame_width": 0},
         {"frame_height": -1},
         {"monitor_fps": 0.0},
+        {"preview_fps": 0.0},
+        {"preview_fps": 61.0},
         {"camera_trigger_cooldown_seconds": 0.0},
         {"face_det_size": 0},
     )

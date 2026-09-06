@@ -58,6 +58,19 @@ Keep `MODEL_PACK=pi4_fp32` unless the INT8 benchmark and recognition evaluation 
 .venv/bin/sic-pi4
 ```
 
+## HDMI preview
+
+Close Guvcview and stop the background service before opening the integrated preview. Run this from a Terminal in the Pi desktop session, without `sudo`:
+
+```bash
+sudo apt install -y python3-tk
+.venv/bin/python -m pip install -e '.[test]'
+sudo systemctl stop sic-pi4-attendance
+.venv/bin/sic-pi4 --preview
+```
+
+The selected camera previews at up to `PREVIEW_FPS=30`; recognition remains bounded by `MONITOR_FPS=4`, motion detection, and the camera trigger cooldown. Recognition starts off. Press `A` to toggle recognition, `1`/`2`/`3` to select a camera, and `Q` or `Esc` to exit. Restart unattended operation afterward with `sudo systemctl start sic-pi4-attendance`.
+
 Install at boot only after every configured camera and enrollment have been verified:
 
 ```bash

@@ -52,4 +52,18 @@ journalctl -u sic-pi4-attendance -f
 curl http://127.0.0.1:8080/health
 ```
 
+## HDMI preview
+
+Guvcview and the attendance runtime must not open the same camera concurrently. Close Guvcview, then run the integrated preview from a Terminal in the active Pi desktop session:
+
+```bash
+cd /home/sic4b/Smart-Attendance-Pi4-multiple-cams
+sudo apt install -y python3-tk
+.venv/bin/python -m pip install -e '.[test]'
+sudo systemctl stop sic-pi4-attendance
+.venv/bin/sic-pi4 --preview
+```
+
+The selected camera requests MJPG at `PREVIEW_FPS=30`; other cameras remain at `MONITOR_FPS`. Press `A` to toggle recognition, `1`/`2`/`3` to switch camera, and `Q` or `Esc` to stop. Run `sudo systemctl start sic-pi4-attendance` afterward to restore unattended operation.
+
 Do not enable unattended production use until measured false-accept and false-reject results have been documented.

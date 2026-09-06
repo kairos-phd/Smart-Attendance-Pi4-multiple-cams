@@ -15,12 +15,13 @@ grep -aq "Raspberry Pi 4" /proc/device-tree/model || {
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sudo apt update
 sudo apt install -y build-essential cmake git libgl1 libglib2.0-0t64 libopenblas-dev \
-  python3-dev python3-pip python3-venv v4l-utils
+  python3-dev python3-pip python3-tk python3-venv v4l-utils
 
 python3 -m venv "$ROOT/.venv"
 "$ROOT/.venv/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 13), sys.version'
 "$ROOT/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 "$ROOT/.venv/bin/python" -m pip install -e "$ROOT[test]"
+"$ROOT/.venv/bin/python" -c 'import cv2, tkinter; from PIL import Image, ImageTk'
 
 SERVICE_USER="${SUDO_USER:-$USER}"
 SERVICE_GROUP="$(id -gn "$SERVICE_USER")"

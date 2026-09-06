@@ -160,10 +160,59 @@ def test_two_recognition_frames_use_cached_catalog_without_database_reads() -> N
     seen = []
     runtime.engine = SimpleNamespace(recognize=lambda image, catalog, *args: seen.append(catalog) or [])
     runtime.inference_lock = __import__("threading").RLock()
+    runtime.recognition_enabled = threading.Event()
+    runtime.recognition_enabled.set()
     runtime.metrics = RuntimeMetrics()
     runtime.store = SimpleNamespace(active_users=lambda: (_ for _ in ()).throw(AssertionError("per-frame DB read")))
     runtime._inference_loop()
     assert seen == [runtime._embedding_catalog, runtime._embedding_catalog]
+
+
+def test_inference_discards_queued_frame_after_preview_disables_recognition() -> None:
+    runtime = AttendanceRuntime.__new__(AttendanceRuntime)
+    frame = np.zeros((16, 16, 3), dtype=np.uint8)
+    candidates = [FrameCandidate("cam", 1.0, datetime.now(timezone.utc), frame)]
+    runtime.stop_event = SimpleNamespace(is_set=lambda: not candidates)
+    runtime.frames = SimpleNamespace(get=lambda timeout: candidates.pop(0))
+    runtime.recognition_enabled = threading.Event()
+    runtime.engine = SimpleNamespace(recognize=lambda *args: (_ for _ in ()).throw(AssertionError("recognition ran")))
+
+    runtime._inference_loop()
+
+
+def test_preview_failure_still_stops_threads_and_closes_store() -> None:
+    runtime = AttendanceRuntime.__new__(AttendanceRuntime)
+    calls = []
+    runtime.start = lambda: calls.append("start")
+    runtime.stop = lambda: calls.append("stop")
+    runtime.stop_event = threading.Event()
+    runtime.preview = SimpleNamespace(run=lambda stop: (_ for _ in ()).throw(RuntimeError("preview failed")))
+    runtime._workers = [SimpleNamespace(join=lambda timeout: calls.append("worker"), is_alive=lambda: False)]
+    runtime._inference_thread = runtime._retention_thread = runtime._cloud_thread = runtime._api_thread = None
+    runtime._enrollment_lock = threading.Lock()
+    runtime.store = SimpleNamespace(close=lambda: calls.append("close"))
+
+    with pytest.raises(RuntimeError, match="preview failed"):
+        runtime.run()
+
+    assert calls == ["start", "stop", "worker", "close"]
+
+
+def test_shutdown_does_not_close_store_under_blocked_camera_worker() -> None:
+    runtime = AttendanceRuntime.__new__(AttendanceRuntime)
+    closed = []
+    runtime.start = lambda: None
+    runtime.stop = lambda: runtime.stop_event.set()
+    runtime.stop_event = threading.Event()
+    runtime.preview = SimpleNamespace(run=lambda stop: stop.set())
+    runtime._workers = [SimpleNamespace(name="blocked-camera", join=lambda timeout: None, is_alive=lambda: True)]
+    runtime._inference_thread = runtime._retention_thread = runtime._cloud_thread = runtime._api_thread = None
+    runtime._enrollment_lock = threading.Lock()
+    runtime.store = SimpleNamespace(close=lambda: closed.append(True))
+
+    runtime.run()
+
+    assert closed == []
 
 
 def test_failed_atomic_status_audit_keeps_database_and_cache_consistent(tmp_path: Path) -> None:

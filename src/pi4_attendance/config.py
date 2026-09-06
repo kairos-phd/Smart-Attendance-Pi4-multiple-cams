@@ -55,6 +55,7 @@ class Settings:
     cloud_summary_enabled: bool
     firebase_project_id: str | None
     log_level: str
+    preview_fps: float = 30.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -102,6 +103,7 @@ class Settings:
             cloud_summary_enabled=_bool("CLOUD_SUMMARY_ENABLED", False),
             firebase_project_id=os.getenv("FIREBASE_PROJECT_ID") or None,
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            preview_fps=float(os.getenv("PREVIEW_FPS", "30")),
         )
         settings.validate()
         return settings
@@ -117,6 +119,8 @@ class Settings:
             raise ValueError("FRAME_WIDTH and FRAME_HEIGHT must be positive")
         if self.monitor_fps <= 0:
             raise ValueError("MONITOR_FPS must be positive")
+        if not 0 < self.preview_fps <= 60:
+            raise ValueError("PREVIEW_FPS must be between 0 and 60")
         if self.camera_trigger_cooldown_seconds <= 0:
             raise ValueError("CAMERA_TRIGGER_COOLDOWN_SECONDS must be positive")
         if self.face_det_size <= 0:

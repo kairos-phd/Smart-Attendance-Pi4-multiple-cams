@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import logging
 import os
@@ -66,7 +67,7 @@ class RuntimeMetrics:
 
 
 class AttendanceRuntime:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, preview: bool = False) -> None:
         self.settings = settings
         self.store = PiStore(settings.data_root)
         self.cloud = CloudSummary(settings)
@@ -81,6 +82,15 @@ class AttendanceRuntime:
         )
         self.frames = FairFrameQueue([camera.camera_id for camera in settings.cameras], settings.frame_queue_size)
         self.stop_event = threading.Event()
+        if preview:
+            from .preview import PreviewWindow
+
+            self.preview = PreviewWindow(tuple(camera.camera_id for camera in settings.cameras), settings.preview_fps)
+        else:
+            self.preview = None
+        self.recognition_enabled = self.preview.recognition_enabled if self.preview is not None else threading.Event()
+        if self.preview is None:
+            self.recognition_enabled.set()
         self.inference_lock = threading.RLock()
         self._enrollment_lock = threading.Lock()
         self._catalog_lock = threading.Lock()
@@ -108,7 +118,17 @@ class AttendanceRuntime:
         self.engine.start()
         self._refresh_embedding_catalog()
         self._workers = [
-            CameraWorker(camera, self.settings, self.frames, self.stop_event, self._camera_status)
+            CameraWorker(
+                camera,
+                self.settings,
+                self.frames,
+                self.stop_event,
+                self._camera_status,
+                recognition_enabled=self.recognition_enabled,
+                on_preview_frame=None if self.preview is None else self.preview.submit,
+                preview_selected=None if self.preview is None else self.preview.is_selected,
+                preview_fps=None if self.preview is None else self.settings.preview_fps,
+            )
             for camera in self.settings.cameras
         ]
         self._inference_thread = threading.Thread(target=self._inference_loop, name="pi4-inference", daemon=True)
@@ -165,6 +185,8 @@ class AttendanceRuntime:
             try:
                 candidate = self.frames.get(timeout=0.15)
             except queue.Empty:
+                continue
+            if not self.recognition_enabled.is_set():
                 continue
             try:
                 inference_started = time.monotonic()
@@ -363,29 +385,43 @@ class AttendanceRuntime:
 
     def run(self) -> None:
         self.start()
-        while not self.stop_event.wait(1):
-            pass
-        for worker in self._workers:
-            worker.join(timeout=3)
-        if self._inference_thread is not None:
-            self._inference_thread.join(timeout=5)
-        if self._retention_thread is not None:
-            self._retention_thread.join(timeout=2)
-        if self._cloud_thread is not None:
-            self._cloud_thread.join(timeout=5)
-        if self._api_thread is not None:
-            self._api_thread.join(timeout=5)
-        with self._enrollment_lock:
-            self.store.close()
+        try:
+            preview = getattr(self, "preview", None)
+            if preview is None:
+                while not self.stop_event.wait(1):
+                    pass
+            else:
+                preview.run(self.stop_event)
+        finally:
+            self.stop()
+            for worker in self._workers:
+                worker.join(timeout=3)
+            if self._inference_thread is not None:
+                self._inference_thread.join(timeout=5)
+            if self._retention_thread is not None:
+                self._retention_thread.join(timeout=2)
+            if self._cloud_thread is not None:
+                self._cloud_thread.join(timeout=5)
+            if self._api_thread is not None:
+                self._api_thread.join(timeout=5)
+            blocked_workers = [worker.name for worker in self._workers if worker.is_alive()]
+            if blocked_workers:
+                LOG.error("Camera workers did not stop; leaving SQLite open until process exit: %s", blocked_workers)
+            else:
+                with self._enrollment_lock:
+                    self.store.close()
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="SIC Raspberry Pi attendance runtime")
+    parser.add_argument("--preview", action="store_true", help="show HDMI preview; A toggles recognition")
+    args = parser.parse_args()
     settings = Settings.from_env()
     logging.basicConfig(
         level=getattr(logging, settings.log_level, logging.INFO),
         format="%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s",
     )
-    runtime = AttendanceRuntime(settings)
+    runtime = AttendanceRuntime(settings, preview=args.preview)
     signal.signal(signal.SIGTERM, lambda *_: runtime.stop())
     signal.signal(signal.SIGINT, lambda *_: runtime.stop())
     runtime.run()
