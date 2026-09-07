@@ -28,6 +28,7 @@ class CameraWorker(threading.Thread):
         on_preview_frame: Callable[[str, object], None] | None = None,
         preview_selected: Callable[[str], bool] | None = None,
         preview_fps: float | None = None,
+        metrics=None,
     ) -> None:
         super().__init__(name=f"capture-{camera.camera_id}", daemon=True)
         self.camera = camera
@@ -41,26 +42,54 @@ class CameraWorker(threading.Thread):
         self.on_preview_frame = on_preview_frame
         self.preview_selected = preview_selected
         self.preview_fps = preview_fps
+        self.metrics = metrics
         self.motion = MotionDetector(settings.motion_min_area)
         self.dropped = 0
         self._last_monitor = float("-inf")
         self._last_trigger = float("-inf")
 
     def _enqueue(self, candidate: FrameCandidate) -> None:
-        if self.output.put(candidate):
+        if self.metrics is not None:
+            self.metrics.increment(f"camera.{self.camera.camera_id}.enqueued")
+        replaced = self.output.put(candidate)
+        if self.metrics is not None and hasattr(self.output, "qsize"):
+            self.metrics.set_gauge("queue.depth", self.output.qsize())
+        if replaced:
             self.dropped += 1
+            if self.metrics is not None:
+                self.metrics.increment(f"camera.{self.camera.camera_id}.queue_replaced")
             self.on_status(self.camera, "online", "Inference queue pressure", 1)
             LOG.warning("Replaced oldest queued frame from %s; queue pressure recorded", self.camera.camera_id)
 
     def _process_frame(self, frame, now: float) -> None:
+        if self.metrics is not None:
+            prefix = f"camera.{self.camera.camera_id}"
+            self.metrics.increment(f"{prefix}.captured")
+            self.metrics.set_gauge(f"{prefix}.width", frame.shape[1])
+            self.metrics.set_gauge(f"{prefix}.height", frame.shape[0])
+            self.metrics.set_gauge("recognition_enabled", self.recognition_enabled.is_set())
         if self.on_preview_frame is not None and self.preview_selected is not None and self.preview_selected(self.camera.camera_id):
             self.on_preview_frame(self.camera.camera_id, frame)
-        if not self.recognition_enabled.is_set() or now - self._last_monitor < 1.0 / self.settings.monitor_fps:
+        prefix = f"camera.{self.camera.camera_id}"
+        if not self.recognition_enabled.is_set():
+            if self.metrics is not None:
+                self.metrics.increment(f"{prefix}.recognition_disabled")
+            return
+        if now - self._last_monitor < 1.0 / self.settings.monitor_fps:
+            if self.metrics is not None:
+                self.metrics.increment(f"{prefix}.rate_limited")
             return
         self._last_monitor = now
-        if now - self._last_trigger >= self.settings.camera_trigger_cooldown_seconds and self.motion.has_activity(frame):
-            self._last_trigger = now
-            self._enqueue(FrameCandidate(self.camera.camera_id, now, utc_now(), frame.copy()))
+        if now - self._last_trigger < self.settings.camera_trigger_cooldown_seconds:
+            if self.metrics is not None:
+                self.metrics.increment(f"{prefix}.trigger_cooldown")
+            return
+        if not self.motion.has_activity(frame):
+            if self.metrics is not None:
+                self.metrics.increment(f"{prefix}.no_motion")
+            return
+        self._last_trigger = now
+        self._enqueue(FrameCandidate(self.camera.camera_id, now, utc_now(), frame.copy()))
 
     def _target_fps(self) -> float:
         if self.preview_fps is not None and self.preview_selected is not None and self.preview_selected(self.camera.camera_id):

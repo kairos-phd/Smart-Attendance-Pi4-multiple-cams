@@ -193,11 +193,20 @@ class PiStore:
     def recent_attendance(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT attendance_id,session_id,user_id,name,confidence_scaled,camera_ids_json,occurred_at,sync_state "
-                "FROM attendance ORDER BY attendance_id DESC LIMIT ?",
+                "SELECT attendance.attendance_id,attendance.session_id,attendance.user_id,attendance.name,"
+                "users.student_id,attendance.confidence_scaled,attendance.camera_ids_json,"
+                "attendance.occurred_at,attendance.sync_state "
+                "FROM attendance JOIN users ON users.user_id=attendance.user_id "
+                "ORDER BY attendance.attendance_id DESC LIMIT ?",
                 (max(1, min(limit, 500)),),
             ).fetchall()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["camera_ids"] = json.loads(item["camera_ids_json"])
+            item["similarity"] = item["confidence_scaled"] / 10_000
+            result.append(item)
+        return result
 
     def pending_attendance(self, limit: int = 50) -> list[RecognitionDecision]:
         with self._lock:
@@ -351,6 +360,11 @@ class PiStore:
             )
 
     def record_decision(self, decision: RecognitionDecision, cooldown_seconds: int) -> bool:
+        return self.record_decision_result(decision, cooldown_seconds)[0]
+
+    def record_decision_result(
+        self, decision: RecognitionDecision, cooldown_seconds: int
+    ) -> tuple[bool, str]:
         cameras_json = json.dumps((decision.camera_id,))
         with self._lock, self._conn:
             self._conn.execute(
@@ -373,19 +387,19 @@ class PiStore:
                 ),
             )
             if decision.status != "accepted" or not decision.user_id or not decision.name:
-                return False
+                return False, "rejected"
             active = self._conn.execute(
                 "SELECT 1 FROM users WHERE user_id=? AND status='active'", (decision.user_id,)
             ).fetchone()
             if not active:
-                return False
+                return False, "inactive_user"
             cutoff = (decision.decided_at - timedelta(seconds=cooldown_seconds)).isoformat()
             duplicate = self._conn.execute(
                 "SELECT 1 FROM attendance WHERE user_id=? AND occurred_at>=? LIMIT 1",
                 (decision.user_id, cutoff),
             ).fetchone()
             if duplicate:
-                return False
+                return False, "cooldown"
             self._conn.execute(
                 "INSERT OR IGNORE INTO vote_sessions VALUES(?,?,?,?,?,?,?,?)",
                 (
@@ -410,7 +424,7 @@ class PiStore:
                     decision.decided_at.isoformat(),
                 ),
             )
-            return True
+            return True, "recorded"
 
     def recognition_event_rows(self) -> list[dict[str, Any]]:
         with self._lock:

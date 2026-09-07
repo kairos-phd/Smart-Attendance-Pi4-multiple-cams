@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Mapping
 
 import numpy as np
 
@@ -12,12 +14,14 @@ class EmbeddingCatalog:
     users: tuple[RegisteredUser, ...]
     vectors: np.ndarray
     model_version: str
+    users_by_id: Mapping[str, RegisteredUser]
 
     @classmethod
     def from_users(cls, users: list[RegisteredUser], model_version: str) -> "EmbeddingCatalog":
         compatible = tuple(user for user in users if user.model_version == model_version)
+        users_by_id = MappingProxyType({user.user_id: user for user in compatible})
         if not compatible:
-            return cls((), np.empty((0, 0), dtype=np.float32), model_version)
+            return cls((), np.empty((0, 0), dtype=np.float32), model_version, users_by_id)
         dimension = compatible[0].embedding_q.size
         if dimension <= 0 or any(user.embedding_q.dtype != np.int8 or user.embedding_q.ndim != 1 or user.embedding_q.size != dimension for user in compatible):
             raise ValueError("Compatible embeddings must be non-empty INT8 vectors with one dimension")
@@ -33,7 +37,10 @@ class EmbeddingCatalog:
         if matrix.size:
             matrix = np.ascontiguousarray(matrix / norms)
             matrix.flags.writeable = False
-        return cls(compatible, matrix, model_version)
+        return cls(compatible, matrix, model_version, users_by_id)
+
+    def user(self, user_id: str | None) -> RegisteredUser | None:
+        return None if user_id is None else self.users_by_id.get(user_id)
 
     def top_two(self, query_q: np.ndarray, query_scale: float) -> tuple[RegisteredUser | None, float, float]:
         if not np.isfinite(query_scale) or query_scale <= 0:

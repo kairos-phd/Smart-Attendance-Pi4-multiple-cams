@@ -34,6 +34,14 @@ def test_catalog_is_stable_for_empty_and_single_user() -> None:
     assert second == 0.0
 
 
+def test_catalog_looks_up_user_metadata_without_scanning() -> None:
+    expected = user("u1", [1, 0])
+    catalog = EmbeddingCatalog.from_users([expected], "model-v1")
+
+    assert catalog.user("u1") is expected
+    assert catalog.user("missing") is None
+
+
 def test_catalog_rejects_mixed_dimensions_and_invalid_scale() -> None:
     with pytest.raises(ValueError):
         EmbeddingCatalog.from_users([user("u1", [1, 2]), user("u2", [1, 2, 3])], "model-v1")

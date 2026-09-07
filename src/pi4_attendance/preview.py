@@ -5,6 +5,7 @@ import threading
 import time
 import tkinter as tk
 from collections.abc import Callable
+from dataclasses import dataclass
 from tkinter import simpledialog
 
 import cv2
@@ -12,6 +13,16 @@ import numpy as np
 from PIL import Image, ImageTk
 
 LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RecognitionDisplay:
+    name: str
+    student_id: str
+    similarity: float
+    timestamp: str
+    status: str
+    expires_at: float
 
 
 class PreviewWindow:
@@ -34,6 +45,7 @@ class PreviewWindow:
         self._last_enrollment_sequence = -1
         self._enrollment_busy = False
         self._enrollment_status = ""
+        self._recognition_by_camera: dict[str, RecognitionDisplay] = {}
         self._lock = threading.Lock()
 
     @property
@@ -56,6 +68,34 @@ class PreviewWindow:
     def latest_sample(self) -> tuple[np.ndarray | None, int]:
         with self._lock:
             return (None if self._frame is None else self._frame.copy(), self._sequence)
+
+    def show_recognition(
+        self,
+        camera_id: str,
+        *,
+        name: str,
+        student_id: str,
+        similarity: float,
+        timestamp: str,
+        status: str,
+    ) -> None:
+        result = RecognitionDisplay(
+            name,
+            student_id,
+            similarity,
+            timestamp,
+            status,
+            time.monotonic() + 3.0,
+        )
+        with self._lock:
+            self._recognition_by_camera[camera_id] = result
+
+    @property
+    def latest_recognition(self) -> RecognitionDisplay | None:
+        now = time.monotonic()
+        with self._lock:
+            result = self._recognition_by_camera.get(self.camera_ids[self._selected])
+            return result if result is not None and result.expires_at > now else None
 
     @property
     def enrollment_progress(self) -> tuple[str, str, int] | None:
@@ -214,6 +254,17 @@ class PreviewWindow:
         root.title("SIC Attendance Preview")
         label = tk.Label(root)
         label.pack()
+        status_label = tk.Label(
+            root,
+            bg="#111111",
+            fg="#ffffff",
+            font=("TkDefaultFont", 14, "bold"),
+            justify="left",
+            anchor="w",
+            padx=12,
+            pady=8,
+        )
+        status_label.pack(fill=tk.X)
         root.bind("<Key>", lambda event: self._handle_ui_key(root, stop_event, event))
         root.protocol("WM_DELETE_WINDOW", stop_event.set)
         frames = 0
@@ -232,21 +283,34 @@ class PreviewWindow:
                     measured_fps = frames / elapsed
                     frames = 0
                     measured_at = now
+                state = "ON" if self.recognition_enabled.is_set() else "OFF"
+                progress = self.enrollment_progress
+                if progress is None:
+                    enrollment = "Enroll: [E] start"
+                else:
+                    enrollment = f"Enroll {progress[0]}: {progress[2]}/8 [C] [Enter] [X]"
+                lines = [
+                    f"Camera: {self.selected_camera_id}  |  {measured_fps:.1f} FPS",
+                    f"Recognition: {state} [A]  |  {enrollment}",
+                ]
+                if self.enrollment_status:
+                    lines.append(self.enrollment_status)
+                result = self.latest_recognition
+                if result is not None:
+                    lines.extend(
+                        (
+                            f"{result.name}  |  ID: {result.student_id}",
+                            f"Similarity: {result.similarity:.3f}  |  {result.timestamp}  |  {result.status}",
+                        )
+                    )
+                status_label.configure(text="\n".join(lines))
                 if frame is not None:
-                    state = "ON" if self.recognition_enabled.is_set() else "OFF"
-                    cv2.putText(frame, f"Camera: {self.selected_camera_id}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(frame, f"Camera: {measured_fps:.1f} FPS", (12, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(frame, f"Recognition: {state}  [A]", (12, 88), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    progress = self.enrollment_progress
-                    if progress is None:
-                        enrollment = "Enroll: [E] start"
-                    else:
-                        enrollment = f"Enroll {progress[0]}: {progress[2]}/8 [C] [Enter] [X]"
-                    cv2.putText(frame, enrollment, (12, 118), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
-                    cv2.putText(frame, self.enrollment_status, (12, 146), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
                     image = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
                     label.configure(image=image)
                     label.image = image
+                else:
+                    label.configure(image="")
+                    label.image = None
                 root.update_idletasks()
                 root.update()
                 stop_event.wait(1.0 / self.fps)

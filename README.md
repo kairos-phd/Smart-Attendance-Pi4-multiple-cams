@@ -25,6 +25,40 @@ This folder is the self-contained Raspberry Pi 4 deployment for realtime biometr
 | `tests` | Recognition, image-boundary, model, storage, API, and migration tests |
 | `docs` | Architecture, deployment, calibration, storage, security, and acceptance guidance |
 
+## Add cameras
+
+On the Pi, list the V4L2 devices and their stable symlinks:
+
+```bash
+v4l2-ctl --list-devices
+ls -l /dev/v4l/by-id
+```
+
+Use each camera's `/dev/v4l/by-id/...-video-index0` symlink when it supports video capture. Confirm it before editing `.env`:
+
+```bash
+CAM=/dev/v4l/by-id/REPLACE_CAMERA-video-index0
+v4l2-ctl --device="$CAM" --list-formats-ext
+v4l2-ctl --device="$CAM" --set-fmt-video=width=640,height=480,pixelformat=MJPG --set-parm=30 --stream-mmap=3 --stream-count=120 --stream-to=/dev/null
+```
+
+Keep `CAMERA_COUNT=1` while only camera 1 is connected. To add camera 2 or 3, set `CAMERA_COUNT` to `2` or `3` and fill the matching entries:
+
+```dotenv
+CAMERA_COUNT=3
+CAMERA_1_ID=camera-1
+CAMERA_1_NAME=Camera 1
+CAMERA_1_SOURCE=/dev/v4l/by-id/REPLACE_CAMERA_1-video-index0
+CAMERA_2_ID=camera-2
+CAMERA_2_NAME=Camera 2
+CAMERA_2_SOURCE=/dev/v4l/by-id/REPLACE_CAMERA_2-video-index0
+CAMERA_3_ID=camera-3
+CAMERA_3_NAME=Camera 3
+CAMERA_3_SOURCE=/dev/v4l/by-id/REPLACE_CAMERA_3-video-index0
+```
+
+Give every camera a unique `CAMERA_n_ID`. If `/dev/v4l/by-id` is unavailable, use `/dev/v4l/by-path` and keep each camera on the same USB port. Close Guvcview before testing or starting SIC because only one process can own a camera reliably.
+
 ## Quick deployment
 
 ```bash
@@ -32,6 +66,9 @@ git clone https://github.com/kairos-phd/Smart-Attendance-Pi4-multiple-cams.git s
 cd sic-attendance
 bash scripts/bootstrap_pi.sh
 nano .env
+TOKEN=$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')
+sed -i "s|^ADMIN_SHARED_TOKEN=.*|ADMIN_SHARED_TOKEN=$TOKEN|" .env
+chmod 600 .env
 ```
 
 Place at least 20 representative, consented calibration images under the microSD data directory, then generate both candidates:
@@ -72,6 +109,20 @@ sudo systemctl stop sic-pi4-attendance
 The selected camera previews at up to `PREVIEW_FPS=30`; recognition remains bounded by `MONITOR_FPS=4`, motion detection, and the camera trigger cooldown. Recognition starts off. Press `A` to toggle recognition, `1`/`2`/`3` to select a camera, and `Q` or `Esc` to exit.
 
 Press `E` to enroll from the preview, enter the name and student ID, then press `C` for each new view. Capture 3–8 clear views with one face in each frame. Press `Enter` to save or `X` to cancel. Enrollment runs in the background and the overlay shows its result. A successful enrollment is available to recognition immediately.
+
+Each preview run writes a nonblocking 1 Hz performance log under `DATA_ROOT/performance`. The first row describes the model, camera configuration, and requested resolution; later JSONL rows contain system CPU/RAM, process CPU/RSS, measured camera capture/enqueue rates, inference rate, queue pressure, and rolling latency percentiles. View the current log while recognition is running:
+
+```bash
+LOG=$(ls -1t /var/lib/sic-attendance/performance/*.jsonl | head -n 1)
+tail -n 1 "$LOG" | python3 -m json.tool
+curl http://127.0.0.1:8080/health | python3 -m json.tool
+```
+
+The attendance API is the deduplicated recognition log. It returns the name, student ID, camera IDs, timestamp, and cosine similarity; repeated accepted frames inside `ATTENDANCE_COOLDOWN_SECONDS` remain diagnostic recognition events and do not create another attendance row.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8080/api/attendance?limit=20" | python3 -m json.tool
+```
 
 Restart unattended operation afterward with `sudo systemctl start sic-pi4-attendance`.
 

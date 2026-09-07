@@ -46,6 +46,31 @@ def test_preview_keeps_only_latest_selected_camera_frame() -> None:
     assert second_sequence == first_sequence + 1
 
 
+def test_preview_recognition_is_scoped_to_camera_and_expires(monkeypatch) -> None:
+    now = [100.0]
+    monkeypatch.setattr("pi4_attendance.preview.time.monotonic", lambda: now[0])
+    preview = PreviewWindow(("camera-1", "camera-2"), 30.0)
+
+    preview.show_recognition(
+        "camera-2",
+        name="Nguyễn Văn A",
+        student_id="S001",
+        similarity=0.823,
+        timestamp="10:42:18",
+        status="ATTENDANCE RECORDED",
+    )
+
+    assert preview.latest_recognition is None
+    preview.handle_key(ord("2"))
+    result = preview.latest_recognition
+    assert result is not None
+    assert (result.name, result.student_id, result.similarity) == ("Nguyễn Văn A", "S001", 0.823)
+    assert (result.timestamp, result.status) == ("10:42:18", "ATTENDANCE RECORDED")
+
+    now[0] = 103.01
+    assert preview.latest_recognition is None
+
+
 def test_preview_run_closes_window_when_stop_is_requested(monkeypatch) -> None:
     preview = PreviewWindow(("camera-1",), 30.0)
     stop = threading.Event()
@@ -70,12 +95,19 @@ def test_preview_run_closes_window_when_stop_is_requested(monkeypatch) -> None:
         def destroy(self):
             calls.append("close")
 
+    labels = []
+
     class Label:
-        def __init__(self, root):
+        def __init__(self, root, **options):
+            self.options = options
+            self.configured = {}
+            labels.append(self)
+
+        def pack(self, **options):
             pass
 
-        def pack(self):
-            pass
+        def configure(self, **options):
+            self.configured.update(options)
 
     monkeypatch.setattr("pi4_attendance.preview.tk.Tk", Root)
     monkeypatch.setattr("pi4_attendance.preview.tk.Label", Label)
@@ -83,6 +115,70 @@ def test_preview_run_closes_window_when_stop_is_requested(monkeypatch) -> None:
     preview.run(stop)
 
     assert calls == ["open", "close"]
+    assert labels[1].options["bg"] == "#111111"
+    assert labels[1].options["fg"] == "#ffffff"
+
+
+def test_switching_to_camera_without_a_frame_clears_stale_image_and_identity(monkeypatch) -> None:
+    preview = PreviewWindow(("camera-1", "camera-2"), 30.0)
+    preview.submit("camera-1", np.zeros((2, 2, 3), dtype=np.uint8))
+    preview.show_recognition(
+        "camera-1",
+        name="Nguyễn Văn A",
+        student_id="S001",
+        similarity=0.823,
+        timestamp="10:42:18",
+        status="ATTENDANCE RECORDED",
+    )
+    stop = threading.Event()
+    updates = 0
+
+    class Root:
+        def title(self, value):
+            pass
+
+        def bind(self, *args):
+            pass
+
+        def protocol(self, *args):
+            pass
+
+        def update_idletasks(self):
+            pass
+
+        def update(self):
+            nonlocal updates
+            updates += 1
+            if updates == 1:
+                preview.handle_key(ord("2"))
+            else:
+                stop.set()
+
+        def destroy(self):
+            pass
+
+    labels = []
+
+    class Label:
+        def __init__(self, root, **options):
+            self.configured = {}
+            labels.append(self)
+
+        def pack(self, **options):
+            pass
+
+        def configure(self, **options):
+            self.configured.update(options)
+
+    monkeypatch.setattr("pi4_attendance.preview.tk.Tk", Root)
+    monkeypatch.setattr("pi4_attendance.preview.tk.Label", Label)
+    monkeypatch.setattr("pi4_attendance.preview.ImageTk.PhotoImage", lambda image: object())
+
+    preview.run(stop)
+
+    assert labels[0].configured["image"] == ""
+    assert "Camera: camera-2" in labels[1].configured["text"]
+    assert "Nguyễn Văn A" not in labels[1].configured["text"]
 
 
 def test_preview_without_desktop_has_clear_error(monkeypatch) -> None:

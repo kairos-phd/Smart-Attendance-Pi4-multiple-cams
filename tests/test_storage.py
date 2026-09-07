@@ -78,6 +78,47 @@ class StorageTests(unittest.TestCase):
             self.assertFalse(store.record_decision(second, 300))
             store.close()
 
+    def test_recent_attendance_is_a_readable_deduplicated_recognition_log(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = PiStore(Path(directory))
+            try:
+                store.create_user("u1", "Test User", "S001", np.array([1, 2], dtype=np.int8), 0.01, "model-v1")
+                decision = RecognitionDecision(
+                    "o1", "accepted", "u1", "Test User", "camera-2", datetime.now(timezone.utc),
+                    0.8123, 0.1, 0.9, 0.8, (1, 2, 3, 4), "model-v1", "thresholds_passed",
+                )
+
+                self.assertTrue(store.record_decision(decision, 300))
+                [event] = store.recent_attendance()
+
+                self.assertEqual(event["student_id"], "S001")
+                self.assertEqual(event["camera_ids"], ["camera-2"])
+                self.assertEqual(event["similarity"], 0.8123)
+            finally:
+                store.close()
+
+    def test_decision_result_distinguishes_recorded_cooldown_and_inactive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = PiStore(Path(directory))
+            try:
+                store.create_user("u1", "Test User", "S001", np.array([1, 2], dtype=np.int8), 0.01, "model-v1")
+                observed_at = datetime.now(timezone.utc)
+                first = RecognitionDecision(
+                    "o1", "accepted", "u1", "Test User", "camera-1", observed_at,
+                    0.8, 0.1, 0.9, 0.8, (1, 2, 3, 4), "model-v1", "thresholds_passed",
+                )
+                second = replace(first, observation_id="o2", camera_id="camera-2")
+
+                self.assertEqual(store.record_decision_result(first, 300), (True, "recorded"))
+                self.assertEqual(store.record_decision_result(second, 300), (False, "cooldown"))
+                store.set_user_status("u1", "inactive")
+                self.assertEqual(
+                    store.record_decision_result(replace(second, observation_id="o3"), 300),
+                    (False, "inactive_user"),
+                )
+            finally:
+                store.close()
+
     def test_inactive_user_cannot_create_attendance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = PiStore(Path(directory))

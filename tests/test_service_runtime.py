@@ -6,11 +6,12 @@ import threading
 import cv2
 import numpy as np
 
-from pi4_attendance.models import Observation, RecognitionDecision
+from pi4_attendance.models import Observation, RecognitionDecision, RegisteredUser
 from pi4_attendance.models import FrameCandidate
 from pi4_attendance.service import AttendanceRuntime, RuntimeMetrics
 from pi4_attendance.embedding_catalog import EmbeddingCatalog
 from pi4_attendance.storage import PiStore
+from pi4_attendance.telemetry import RollingMetrics
 import pytest
 
 
@@ -25,6 +26,78 @@ def test_runtime_metrics_report_latest_and_aggregate_latencies() -> None:
     }
 
 
+def test_preview_runtime_prepares_a_per_run_performance_log(tmp_path: Path) -> None:
+    settings = SimpleNamespace(
+        data_root=tmp_path,
+        model_root=tmp_path,
+        model_pack="pi4_fp32",
+        pi_id="pi-1",
+        cloud_summary_enabled=False,
+        face_det_size=320,
+        match_threshold=0.45,
+        match_margin=0.06,
+        min_detection_score=0.60,
+        min_face_quality=0.35,
+        frame_queue_size=3,
+        preview_fps=30.0,
+        cameras=(SimpleNamespace(camera_id="camera-1", name="Camera 1", source=0),),
+        frame_width=640,
+        frame_height=480,
+        monitor_fps=4.0,
+        camera_trigger_cooldown_seconds=0.8,
+    )
+
+    runtime = AttendanceRuntime(settings, preview=True)
+
+    assert runtime.performance_log_path.parent == tmp_path / "performance"
+    assert runtime.performance_log_path.suffix == ".jsonl"
+    assert runtime._telemetry_monitor is not None
+    assert runtime._telemetry_writer is not None
+    runtime.store.close()
+
+
+def test_telemetry_lifecycle_writes_run_metadata_and_stops_monitor_before_writer(tmp_path: Path) -> None:
+    runtime = AttendanceRuntime.__new__(AttendanceRuntime)
+    runtime._telemetry_run_id = "run-1"
+    runtime.performance_log_path = tmp_path / "performance" / "run-1.jsonl"
+    runtime.settings = SimpleNamespace(
+        pi_id="pi-1",
+        model_pack="pi4_fp32",
+        cameras=(SimpleNamespace(camera_id="camera-1", name="Camera 1", source="/dev/video0"),),
+        frame_width=640,
+        frame_height=480,
+        monitor_fps=4.0,
+        preview_fps=30.0,
+        face_det_size=320,
+        camera_trigger_cooldown_seconds=0.8,
+    )
+    runtime.engine = SimpleNamespace(model_version="model-v1")
+    runtime.performance_metrics = RollingMetrics()
+    runtime.performance_metrics.increment("inference.processed")
+    calls = []
+    submitted = []
+    runtime._telemetry_writer = SimpleNamespace(
+        submit=lambda row: submitted.append(row) or True,
+        start=lambda: calls.append("writer-start"),
+        stop=lambda: calls.append("writer-stop"),
+    )
+    runtime._telemetry_monitor = SimpleNamespace(
+        start=lambda: calls.append("monitor-start"),
+        stop=lambda: calls.append("monitor-stop"),
+    )
+
+    runtime._start_telemetry()
+    runtime._stop_telemetry()
+
+    assert submitted[0]["type"] == "metadata"
+    assert submitted[0]["run_id"] == "run-1"
+    assert submitted[0]["camera_count"] == 1
+    assert submitted[0]["cameras"][0]["source"] == "/dev/video0"
+    assert submitted[-1]["type"] == "final"
+    assert submitted[-1]["runtime"]["counters"]["inference.processed"] == 1
+    assert calls == ["writer-start", "monitor-start", "monitor-stop", "writer-stop"]
+
+
 def runtime_for_health(state="running", camera_rows=None, inference_alive=True):
     runtime = AttendanceRuntime.__new__(AttendanceRuntime)
     runtime.settings = SimpleNamespace(pi_id="pi-1", cameras=(SimpleNamespace(camera_id="camera-1"),))
@@ -37,6 +110,11 @@ def runtime_for_health(state="running", camera_rows=None, inference_alive=True):
     runtime.store = SimpleNamespace(camera_rows=lambda: rows)
     runtime.metrics = RuntimeMetrics()
     runtime.metrics.record(10.0, 20.0)
+    runtime.performance_metrics = RollingMetrics()
+    runtime.performance_metrics.increment("inference.processed")
+    runtime.performance_log_path = Path("performance/run.jsonl")
+    runtime._telemetry_writer = SimpleNamespace(is_alive=lambda: True, error=None, dropped=0)
+    runtime._telemetry_monitor = SimpleNamespace(is_alive=lambda: True)
     return runtime
 
 
@@ -49,6 +127,78 @@ def test_health_exposes_metrics_and_persisted_dropped_frame_counter() -> None:
     assert health["dropped_frames"] == 7
     assert health["runtime_metrics"]["queue_age_ms"]["latest"] == 10.0
     assert health["runtime_metrics"]["inference_ms"]["aggregate"]["average"] == 20.0
+    assert health["performance_metrics"]["counters"]["inference.processed"] == 1
+    assert health["performance_log"] == str(Path("performance/run.jsonl"))
+    assert health["telemetry"] == {
+        "monitor_alive": True,
+        "writer_alive": True,
+        "writer_error": None,
+        "samples_dropped": 0,
+    }
+
+
+def test_accepted_decision_updates_preview_with_catalog_student_id() -> None:
+    runtime = AttendanceRuntime.__new__(AttendanceRuntime)
+    observed_at = datetime(2026, 9, 7, 3, 42, 18, tzinfo=timezone.utc)
+    decision = RecognitionDecision(
+        "obs-1", "accepted", "u1", "Nguyễn Văn A", "camera-2", observed_at,
+        0.823, 0.1, 0.9, 0.8, (1, 2, 3, 4), "model-v1", "thresholds_passed",
+    )
+    runtime.settings = SimpleNamespace(attendance_cooldown_seconds=300)
+    runtime.store = SimpleNamespace(record_decision_result=lambda *_: (True, "recorded"))
+    runtime._cloud_wake = SimpleNamespace(set=lambda: None)
+    runtime._embedding_catalog = EmbeddingCatalog.from_users(
+        [RegisteredUser("u1", "Nguyễn Văn A", "S001", np.array([1], dtype=np.int8), 0.1, "model-v1")],
+        "model-v1",
+    )
+    shown = []
+    runtime.preview = SimpleNamespace(show_recognition=lambda camera_id, **data: shown.append((camera_id, data)))
+    runtime.performance_metrics = RollingMetrics()
+
+    runtime._handle_decision(decision, SimpleNamespace(), np.empty((0, 0)))
+
+    assert shown == [
+        (
+            "camera-2",
+            {
+                "name": "Nguyễn Văn A",
+                "student_id": "S001",
+                "similarity": 0.823,
+                "timestamp": observed_at.astimezone().strftime("%H:%M:%S"),
+                "status": "ATTENDANCE RECORDED",
+            },
+        )
+    ]
+    counters = runtime.performance_metrics.snapshot()["counters"]
+    assert counters["recognition.accepted"] == 1
+    assert counters["attendance.recorded"] == 1
+
+
+def test_inactive_user_race_does_not_show_a_false_cooldown_identity() -> None:
+    runtime = AttendanceRuntime.__new__(AttendanceRuntime)
+    observed_at = datetime.now(timezone.utc)
+    decision = RecognitionDecision(
+        "obs-1", "accepted", "u1", "User", "camera-1", observed_at,
+        0.823, 0.1, 0.9, 0.8, (1, 2, 3, 4), "model-v1", "thresholds_passed",
+    )
+    runtime.settings = SimpleNamespace(attendance_cooldown_seconds=300)
+    runtime.store = SimpleNamespace(
+        record_decision=lambda *_: False,
+        record_decision_result=lambda *_: (False, "inactive_user"),
+    )
+    runtime._cloud_wake = SimpleNamespace(set=lambda: None)
+    runtime._embedding_catalog = EmbeddingCatalog.from_users(
+        [RegisteredUser("u1", "User", "S001", np.array([1], dtype=np.int8), 0.1, "model-v1")],
+        "model-v1",
+    )
+    shown = []
+    runtime.preview = SimpleNamespace(show_recognition=lambda *args, **kwargs: shown.append((args, kwargs)))
+    runtime.performance_metrics = RollingMetrics()
+
+    runtime._handle_decision(decision, SimpleNamespace(), np.empty((0, 0)))
+
+    assert shown == []
+    assert runtime.performance_metrics.snapshot()["counters"]["attendance.inactive_user"] == 1
 
 
 def test_health_ignores_dropped_frames_from_stale_historical_camera() -> None:
@@ -71,6 +221,26 @@ def test_health_reports_starting_degraded_and_stopped_honestly() -> None:
     assert runtime_for_health(camera_rows=[{"status": "offline", "dropped_frames": 2}]).health()["status"] == "degraded"
     assert runtime_for_health(camera_rows=[{"status": "online", "dropped_frames": 2}], inference_alive=False).health()["status"] == "degraded"
     assert runtime_for_health(state="stopped").health()["status"] == "stopped"
+
+
+def test_camera_status_tracks_current_active_camera_count_and_failures() -> None:
+    runtime = AttendanceRuntime.__new__(AttendanceRuntime)
+    runtime.store = SimpleNamespace(update_camera=lambda *args: None)
+    runtime.cloud = SimpleNamespace(enabled=False)
+    runtime._camera_cloud_lock = threading.Lock()
+    runtime._online_camera_ids = set()
+    runtime.performance_metrics = RollingMetrics()
+    camera_1 = SimpleNamespace(camera_id="camera-1", name="Camera 1")
+    camera_2 = SimpleNamespace(camera_id="camera-2", name="Camera 2")
+
+    runtime._camera_status(camera_1, "online", None, 0)
+    runtime._camera_status(camera_2, "online", None, 0)
+    runtime._camera_status(camera_1, "offline", "read failed", 0)
+
+    snapshot = runtime.performance_metrics.snapshot()
+    assert snapshot["gauges"]["active_cameras"] == 1
+    assert snapshot["gauges"]["camera.camera-1.online"] == 0
+    assert snapshot["counters"]["camera.camera-1.failures"] == 1
 
 
 def test_unknown_retention_writes_only_crop_for_matching_observation(tmp_path: Path, monkeypatch) -> None:
@@ -155,7 +325,7 @@ def test_two_recognition_frames_use_cached_catalog_without_database_reads() -> N
     frame = np.zeros((16, 16, 3), dtype=np.uint8)
     candidates = [FrameCandidate("cam", 1.0, datetime.now(timezone.utc), frame), FrameCandidate("cam", 2.0, datetime.now(timezone.utc), frame)]
     runtime.stop_event = SimpleNamespace(is_set=lambda: not candidates)
-    runtime.frames = SimpleNamespace(get=lambda timeout: candidates.pop(0))
+    runtime.frames = SimpleNamespace(get=lambda timeout: candidates.pop(0), qsize=lambda: len(candidates))
     runtime._embedding_catalog = EmbeddingCatalog.from_users([], "model-v1")
     seen = []
     runtime.engine = SimpleNamespace(recognize=lambda image, catalog, *args: seen.append(catalog) or [])
@@ -163,9 +333,16 @@ def test_two_recognition_frames_use_cached_catalog_without_database_reads() -> N
     runtime.recognition_enabled = threading.Event()
     runtime.recognition_enabled.set()
     runtime.metrics = RuntimeMetrics()
+    runtime.performance_metrics = RollingMetrics()
     runtime.store = SimpleNamespace(active_users=lambda: (_ for _ in ()).throw(AssertionError("per-frame DB read")))
     runtime._inference_loop()
     assert seen == [runtime._embedding_catalog, runtime._embedding_catalog]
+    snapshot = runtime.performance_metrics.snapshot()
+    assert snapshot["counters"]["inference.processed"] == 2
+    assert snapshot["distributions"]["inference_ms"]["samples"] == 2
+    assert snapshot["distributions"]["inference_lock_wait_ms"]["samples"] == 2
+    assert snapshot["distributions"]["queue_age_ms"]["samples"] == 2
+    assert snapshot["distributions"]["full_processing_ms"]["samples"] == 2
 
 
 def test_inference_discards_queued_frame_after_preview_disables_recognition() -> None:

@@ -25,9 +25,10 @@ from .face_engine import FaceEngine
 from .embedding_catalog import EmbeddingCatalog
 from .frame_queue import FairFrameQueue
 from .images import crop_face
-from .models import FrameCandidate, Observation, RecognitionDecision
+from .models import FrameCandidate, Observation, RecognitionDecision, utc_now
 from .recognition import RecognitionPolicy
 from .storage import PiStore
+from .telemetry import JsonlTelemetryWriter, ProcSampler, RollingMetrics, TelemetryMonitor
 
 LOG = logging.getLogger(__name__)
 
@@ -107,10 +108,28 @@ class AttendanceRuntime:
         self._cloud_wake = threading.Event()
         self._camera_cloud_lock = threading.Lock()
         self._pending_camera_status: dict[str, tuple[CameraConfig, str, str | None]] = {}
+        self._online_camera_ids: set[str] = set()
         self._cloud_poll_seconds = 1.0
         self._started = time.monotonic()
         self._runtime_state = "starting"
         self.metrics = RuntimeMetrics()
+        self.performance_metrics = RollingMetrics(window_seconds=10.0)
+        self.performance_log_path: Path | None = None
+        self._telemetry_writer: JsonlTelemetryWriter | None = None
+        self._telemetry_monitor: TelemetryMonitor | None = None
+        self._telemetry_run_id = ""
+        if preview:
+            self._telemetry_run_id = f"{utc_now().strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}"
+            self.performance_log_path = (
+                settings.data_root / "performance" / f"{self._telemetry_run_id}.jsonl"
+            )
+            self._telemetry_writer = JsonlTelemetryWriter(self.performance_log_path)
+            self._telemetry_monitor = TelemetryMonitor(
+                ProcSampler(),
+                self.performance_metrics,
+                self._telemetry_writer,
+                run_id=self._telemetry_run_id,
+            )
         self._embedding_catalog = EmbeddingCatalog.from_users([], self.engine.model_version)
 
     def _refresh_embedding_catalog(self) -> None:
@@ -132,6 +151,7 @@ class AttendanceRuntime:
                 on_preview_frame=None if self.preview is None else self.preview.submit,
                 preview_selected=None if self.preview is None else self.preview.is_selected,
                 preview_fps=None if self.preview is None else self.settings.preview_fps,
+                metrics=self.performance_metrics,
             )
             for camera in self.settings.cameras
         ]
@@ -147,14 +167,76 @@ class AttendanceRuntime:
         if self.settings.api_enabled:
             self._api_thread = threading.Thread(target=self._api_loop, name="pi4-api", daemon=True)
             self._api_thread.start()
+        self._start_telemetry()
         self._runtime_state = "running"
 
     def _camera_status(self, camera: CameraConfig, status: str, error: str | None, dropped: int) -> None:
         self.store.update_camera(camera.camera_id, camera.name, status, error, dropped)
+        with self._camera_cloud_lock:
+            online_camera_ids = getattr(self, "_online_camera_ids", None)
+            if online_camera_ids is None:
+                online_camera_ids = self._online_camera_ids = set()
+            if status == "online":
+                online_camera_ids.add(camera.camera_id)
+            else:
+                online_camera_ids.discard(camera.camera_id)
+            performance = getattr(self, "performance_metrics", None)
+            if performance is not None:
+                performance.set_gauge("active_cameras", len(online_camera_ids))
+                performance.set_gauge(f"camera.{camera.camera_id}.online", status == "online")
+                if status != "online":
+                    performance.increment(f"camera.{camera.camera_id}.failures")
         if self.cloud.enabled:
             with self._camera_cloud_lock:
                 self._pending_camera_status[camera.camera_id] = (camera, status, error)
             self._cloud_wake.set()
+
+    def _start_telemetry(self) -> None:
+        if self._telemetry_writer is None or self._telemetry_monitor is None:
+            return
+        self._telemetry_writer.submit(
+            {
+                "type": "metadata",
+                "run_id": self._telemetry_run_id,
+                "started_at": utc_now().isoformat(),
+                "pi_id": self.settings.pi_id,
+                "model_pack": self.settings.model_pack,
+                "model_version": self.engine.model_version,
+                "camera_count": len(self.settings.cameras),
+                "cameras": [
+                    {
+                        "camera_id": camera.camera_id,
+                        "name": camera.name,
+                        "source": str(camera.source),
+                    }
+                    for camera in self.settings.cameras
+                ],
+                "requested_resolution": [self.settings.frame_width, self.settings.frame_height],
+                "monitor_fps": self.settings.monitor_fps,
+                "preview_fps": self.settings.preview_fps,
+                "face_det_size": self.settings.face_det_size,
+                "camera_trigger_cooldown_seconds": self.settings.camera_trigger_cooldown_seconds,
+            }
+        )
+        self._telemetry_writer.start()
+        self._telemetry_monitor.start()
+        LOG.info("Performance log: %s", self.performance_log_path)
+
+    def _stop_telemetry(self) -> None:
+        monitor = getattr(self, "_telemetry_monitor", None)
+        writer = getattr(self, "_telemetry_writer", None)
+        if monitor is not None:
+            monitor.stop()
+        if writer is not None:
+            writer.submit(
+                {
+                    "type": "final",
+                    "run_id": getattr(self, "_telemetry_run_id", ""),
+                    "finished_at": utc_now().isoformat(),
+                    "runtime": self.performance_metrics.snapshot(),
+                }
+            )
+            writer.stop()
 
     def _cloud_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -191,10 +273,14 @@ class AttendanceRuntime:
             except queue.Empty:
                 continue
             if not self.recognition_enabled.is_set():
+                performance = getattr(self, "performance_metrics", None)
+                if performance is not None:
+                    performance.increment("inference.recognition_disabled")
                 continue
             try:
-                inference_started = time.monotonic()
+                processing_started = time.monotonic()
                 with self.inference_lock:
+                    inference_started = time.monotonic()
                     observations = self.engine.recognize(
                         candidate.frame,
                         self._embedding_catalog,
@@ -202,14 +288,27 @@ class AttendanceRuntime:
                         candidate.captured_monotonic,
                         candidate.captured_at,
                     )
-                self.metrics.record(
-                    (inference_started - candidate.captured_monotonic) * 1000.0,
-                    (time.monotonic() - inference_started) * 1000.0,
-                )
+                inference_finished = time.monotonic()
+                queue_age_ms = (processing_started - candidate.captured_monotonic) * 1000.0
+                lock_wait_ms = (inference_started - processing_started) * 1000.0
+                inference_ms = (inference_finished - inference_started) * 1000.0
+                self.metrics.record(queue_age_ms, inference_ms)
+                performance = getattr(self, "performance_metrics", None)
+                if performance is not None:
+                    performance.increment("inference.processed")
+                    performance.observe("queue_age_ms", queue_age_ms)
+                    performance.observe("inference_lock_wait_ms", lock_wait_ms)
+                    performance.observe("inference_ms", inference_ms)
+                    performance.set_gauge("queue.depth", self.frames.qsize())
                 for observation in observations:
                     self.store.record_observation(observation)
                     self._handle_decision(
                         self.recognition_policy.decide(observation), observation, candidate.frame
+                    )
+                if performance is not None:
+                    performance.observe(
+                        "full_processing_ms",
+                        (time.monotonic() - candidate.captured_monotonic) * 1000.0,
                     )
             except Exception:
                 LOG.exception("Inference failed for %s", candidate.camera_id)
@@ -217,8 +316,15 @@ class AttendanceRuntime:
     def _handle_decision(
         self, decision: RecognitionDecision, observation: Observation, frame: np.ndarray
     ) -> None:
-        inserted = self.store.record_decision(decision, self.settings.attendance_cooldown_seconds)
+        inserted, attendance_outcome = self.store.record_decision_result(
+            decision, self.settings.attendance_cooldown_seconds
+        )
+        performance = getattr(self, "performance_metrics", None)
+        if performance is not None:
+            performance.increment(f"recognition.{decision.status}")
         if decision.status == "accepted":
+            if performance is not None:
+                performance.increment(f"attendance.{attendance_outcome}")
             LOG.info(
                 "Recognition accepted %s from %s (%.4f)%s",
                 decision.name,
@@ -226,6 +332,18 @@ class AttendanceRuntime:
                 decision.similarity,
                 "" if inserted else " [cooldown suppressed]",
             )
+            preview = getattr(self, "preview", None)
+            if preview is not None and attendance_outcome in {"recorded", "cooldown"}:
+                matched_user = self._embedding_catalog.user(decision.user_id)
+                if matched_user is not None:
+                    preview.show_recognition(
+                        decision.camera_id,
+                        name=decision.name or "Unknown",
+                        student_id=matched_user.student_id,
+                        similarity=decision.similarity,
+                        timestamp=decision.observed_at.astimezone().strftime("%H:%M:%S"),
+                        status="ATTENDANCE RECORDED" if inserted else "COOLDOWN",
+                    )
             if inserted:
                 self._cloud_wake.set()
         else:
@@ -290,6 +408,8 @@ class AttendanceRuntime:
             status = "degraded"
         else:
             status = "ok"
+        telemetry_writer = getattr(self, "_telemetry_writer", None)
+        telemetry_monitor = getattr(self, "_telemetry_monitor", None)
         return {
             "status": status,
             "pi_id": self.settings.pi_id,
@@ -300,6 +420,14 @@ class AttendanceRuntime:
             "camera_status": current_rows,
             "dropped_frames": sum(int(row.get("dropped_frames", 0)) for row in current_rows),
             "runtime_metrics": self.metrics.snapshot(),
+            "performance_metrics": self.performance_metrics.snapshot(),
+            "performance_log": None if self.performance_log_path is None else str(self.performance_log_path),
+            "telemetry": {
+                "monitor_alive": telemetry_monitor is not None and telemetry_monitor.is_alive(),
+                "writer_alive": telemetry_writer is not None and telemetry_writer.is_alive(),
+                "writer_error": None if telemetry_writer is None else telemetry_writer.error,
+                "samples_dropped": 0 if telemetry_writer is None else telemetry_writer.dropped,
+            },
             "uptime_seconds": round(time.monotonic() - self._started, 1),
         }
 
@@ -408,6 +536,7 @@ class AttendanceRuntime:
                 self._cloud_thread.join(timeout=5)
             if self._api_thread is not None:
                 self._api_thread.join(timeout=5)
+            self._stop_telemetry()
             blocked_workers = [worker.name for worker in self._workers if worker.is_alive()]
             if blocked_workers:
                 LOG.error("Camera workers did not stop; leaving SQLite open until process exit: %s", blocked_workers)
