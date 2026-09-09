@@ -3,14 +3,11 @@ from __future__ import annotations
 import logging
 import threading
 import time
-import tkinter as tk
 from collections.abc import Callable
 from dataclasses import dataclass
-from tkinter import simpledialog
 
 import cv2
 import numpy as np
-from PIL import Image, ImageTk
 
 LOG = logging.getLogger(__name__)
 
@@ -30,19 +27,21 @@ class PreviewWindow:
         self,
         camera_ids: tuple[str, ...],
         fps: float,
-        on_enroll: Callable[[str, str, list[np.ndarray]], dict] | None = None,
+        on_enroll: Callable[[str, str, list[np.ndarray], str], dict] | None = None,
     ) -> None:
         self.camera_ids = camera_ids
         self.fps = fps
         self._on_enroll = on_enroll
         self.recognition_enabled = threading.Event()
         self._selected = 0
-        self._frame: np.ndarray | None = None
-        self._sequence = 0
+        self._samples: dict[str, tuple[np.ndarray | None, int]] = {
+            camera_id: (None, 0) for camera_id in camera_ids
+        }
         self._enrollment_name: str | None = None
         self._enrollment_student_id: str | None = None
+        self._enrollment_actor: str | None = None
         self._enrollment_frames: list[np.ndarray] = []
-        self._last_enrollment_sequence = -1
+        self._last_enrollment_sequences: dict[str, int] = {}
         self._enrollment_busy = False
         self._enrollment_status = ""
         self._recognition_by_camera: dict[str, RecognitionDisplay] = {}
@@ -56,18 +55,58 @@ class PreviewWindow:
     def is_selected(self, camera_id: str) -> bool:
         return camera_id == self.selected_camera_id
 
+    def select_camera(self, camera_id: str) -> str:
+        try:
+            index = self.camera_ids.index(camera_id)
+        except ValueError as exc:
+            raise ValueError(f"Unknown camera: {camera_id}") from exc
+        with self._lock:
+            self._selected = index
+        return camera_id
+
+    def set_recognition(self, enabled: bool) -> bool:
+        if enabled:
+            self.recognition_enabled.set()
+        else:
+            self.recognition_enabled.clear()
+        return self.recognition_enabled.is_set()
+
     def submit(self, camera_id: str, frame: np.ndarray) -> None:
         with self._lock:
-            if camera_id == self.camera_ids[self._selected]:
-                self._frame = frame.copy()
-                self._sequence += 1
+            if camera_id not in self._samples:
+                raise ValueError(f"Unknown camera: {camera_id}")
+            _, sequence = self._samples[camera_id]
+            self._samples[camera_id] = (frame.copy(), sequence + 1)
 
     def latest_frame(self) -> np.ndarray | None:
         return self.latest_sample()[0]
 
-    def latest_sample(self) -> tuple[np.ndarray | None, int]:
+    def latest_sample(self, camera_id: str | None = None) -> tuple[np.ndarray | None, int]:
         with self._lock:
-            return (None if self._frame is None else self._frame.copy(), self._sequence)
+            camera_id = self.camera_ids[self._selected] if camera_id is None else camera_id
+            if camera_id not in self._samples:
+                raise ValueError(f"Unknown camera: {camera_id}")
+            frame, sequence = self._samples[camera_id]
+            return (None if frame is None else frame.copy(), sequence)
+
+    def status(self) -> dict:
+        with self._lock:
+            enrollment = None
+            if self._enrollment_name is not None and self._enrollment_student_id is not None:
+                enrollment = {
+                    "name": self._enrollment_name,
+                    "student_id": self._enrollment_student_id,
+                    "captured": len(self._enrollment_frames),
+                    "actor": self._enrollment_actor,
+                }
+            return {
+                "camera_ids": list(self.camera_ids),
+                "selected_camera_id": self.camera_ids[self._selected],
+                "recognition_enabled": self.recognition_enabled.is_set(),
+                "enrollment": enrollment,
+                "enrollment_busy": self._enrollment_busy,
+                "enrollment_status": self._enrollment_status,
+            }
 
     def show_recognition(
         self,
@@ -119,10 +158,11 @@ class PreviewWindow:
         with self._lock:
             return self._enrollment_status
 
-    def begin_enrollment(self, name: str, student_id: str) -> bool:
+    def begin_enrollment(self, name: str, student_id: str, actor: str = "hdmi-preview") -> bool:
         name = name.strip()
         student_id = student_id.strip()
-        if not name or not student_id or len(name) > 120 or len(student_id) > 80:
+        actor = actor.strip()
+        if not name or not student_id or not actor or len(name) > 120 or len(student_id) > 80:
             with self._lock:
                 self._enrollment_status = "Name and student ID are required (max 120/80)"
             return False
@@ -131,29 +171,39 @@ class PreviewWindow:
                 return False
             self._enrollment_name = name
             self._enrollment_student_id = student_id
+            self._enrollment_actor = actor
             self._enrollment_frames = []
-            self._last_enrollment_sequence = self._sequence
+            self._last_enrollment_sequences = {
+                camera_id: sequence for camera_id, (_, sequence) in self._samples.items()
+            }
             self._enrollment_status = "Capture 3 to 8 images"
         return True
 
     def capture_enrollment_frame(self) -> bool:
         with self._lock:
-            if self._enrollment_name is None or self._enrollment_busy or self._frame is None:
+            camera_id = self.camera_ids[self._selected]
+            frame, sequence = self._samples[camera_id]
+            if self._enrollment_name is None or self._enrollment_busy or frame is None:
                 return False
-            if self._sequence == self._last_enrollment_sequence:
+            if sequence == self._last_enrollment_sequences.get(camera_id):
                 self._enrollment_status = "Wait for a new camera frame"
                 return False
             if len(self._enrollment_frames) >= 8:
                 self._enrollment_status = "Maximum 8 images"
                 return False
-            self._enrollment_frames.append(self._frame.copy())
-            self._last_enrollment_sequence = self._sequence
+            self._enrollment_frames.append(frame.copy())
+            self._last_enrollment_sequences[camera_id] = sequence
             self._enrollment_status = f"Captured {len(self._enrollment_frames)}/8"
         return True
 
     def submit_enrollment(self) -> bool:
         with self._lock:
-            if self._on_enroll is None or self._enrollment_name is None or self._enrollment_student_id is None:
+            if (
+                self._on_enroll is None
+                or self._enrollment_name is None
+                or self._enrollment_student_id is None
+                or self._enrollment_actor is None
+            ):
                 return False
             if len(self._enrollment_frames) < 3:
                 self._enrollment_status = "Capture at least 3 images"
@@ -162,12 +212,13 @@ class PreviewWindow:
                 return False
             name = self._enrollment_name
             student_id = self._enrollment_student_id
+            actor = self._enrollment_actor
             frames = [frame.copy() for frame in self._enrollment_frames]
             self._enrollment_busy = True
             self._enrollment_status = "Enrolling..."
         threading.Thread(
             target=self._enroll,
-            args=(name, student_id, frames),
+            args=(name, student_id, frames, actor),
             name="pi4-preview-enrollment",
             daemon=True,
         ).start()
@@ -179,15 +230,16 @@ class PreviewWindow:
                 return False
             self._enrollment_name = None
             self._enrollment_student_id = None
+            self._enrollment_actor = None
             self._enrollment_frames = []
-            self._last_enrollment_sequence = -1
+            self._last_enrollment_sequences = {}
             self._enrollment_status = "Enrollment cancelled"
         return True
 
-    def _enroll(self, name: str, student_id: str, frames: list[np.ndarray]) -> None:
+    def _enroll(self, name: str, student_id: str, frames: list[np.ndarray], actor: str) -> None:
         try:
             assert self._on_enroll is not None
-            self._on_enroll(name, student_id, frames)
+            self._on_enroll(name, student_id, frames, actor)
         except ValueError as exc:
             with self._lock:
                 self._enrollment_busy = False
@@ -206,26 +258,22 @@ class PreviewWindow:
         with self._lock:
             self._enrollment_name = None
             self._enrollment_student_id = None
+            self._enrollment_actor = None
             self._enrollment_frames = []
-            self._last_enrollment_sequence = -1
+            self._last_enrollment_sequences = {}
             self._enrollment_busy = False
             self._enrollment_status = "Enrollment complete"
 
     def handle_key(self, key: int) -> bool:
         if key in (ord("a"), ord("A")):
-            if self.recognition_enabled.is_set():
-                self.recognition_enabled.clear()
-            else:
-                self.recognition_enabled.set()
+            self.set_recognition(not self.recognition_enabled.is_set())
         elif ord("1") <= key <= ord("9"):
             index = key - ord("1")
             if index < len(self.camera_ids):
-                with self._lock:
-                    self._selected = index
-                    self._frame = None
+                self.select_camera(self.camera_ids[index])
         return key not in (ord("q"), ord("Q"), 27)
 
-    def _handle_ui_key(self, root: tk.Tk, stop_event: threading.Event, event) -> None:
+    def _handle_ui_key(self, root: object, stop_event: threading.Event, event) -> None:
         if event.keysym == "Return":
             self.submit_enrollment()
             return
@@ -233,6 +281,8 @@ class PreviewWindow:
         if key in (ord("e"), ord("E")):
             if self.enrollment_progress is not None or self.enrollment_busy:
                 return
+            from tkinter import simpledialog
+
             name = simpledialog.askstring("Enroll user", "Name", parent=root)
             if name is None:
                 return
@@ -247,6 +297,9 @@ class PreviewWindow:
             stop_event.set()
 
     def run(self, stop_event: threading.Event) -> None:
+        import tkinter as tk
+        from PIL import Image, ImageTk
+
         try:
             root = tk.Tk()
         except tk.TclError as exc:

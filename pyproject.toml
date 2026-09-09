@@ -29,6 +29,10 @@ sic-pi4 = "pi4_attendance.service:main"
 sic-pi4-prepare-models = "pi4_attendance.tools.prepare_models:main"
 sic-pi4-benchmark = "pi4_attendance.tools.benchmark:main"
 sic-pi4-embeddings = "pi4_attendance.tools.embeddings:main"
+sic-pi4-control = "pi4_attendance.tools.console:control_main"
+sic-pi4-performance = "pi4_attendance.tools.console:performance_main"
+sic-pi4-attendance-log = "pi4_attendance.tools.console:attendance_main"
+sic-console = "pi4_attendance.tools.console:console_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

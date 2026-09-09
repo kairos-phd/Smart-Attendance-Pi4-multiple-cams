@@ -177,6 +177,7 @@ def test_monitor_samples_in_background_and_stops_cleanly(tmp_path: Path) -> None
     assert rows[0]["type"] == "sample"
     assert rows[0]["run_id"] == "run-1"
     assert "timestamp" in rows[0]
+    assert monitor.latest_sample == {"cpu_percent": 12.5}
     assert not monitor.is_alive()
 
 
@@ -206,3 +207,87 @@ def test_monitor_keeps_running_after_a_sampling_error(tmp_path: Path) -> None:
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert sampler.calls >= 2
     assert rows[-1]["system"]["cpu_percent"] == 25.0
+    assert monitor.latest_sample == {"cpu_percent": 25.0}
+
+
+def test_writer_rotates_bounded_files_with_metadata_and_drains(tmp_path: Path) -> None:
+    path = tmp_path / "run.jsonl"
+    writer = JsonlTelemetryWriter(path, max_bytes=180, backup_count=2, run_count=2)
+    metadata = {"type": "metadata", "run_id": "run", "model_pack": "pi4_fp32"}
+    assert writer.submit(metadata)
+    for sequence in range(12):
+        assert writer.submit({"type": "sample", "sequence": sequence, "data": "x" * 30})
+    writer.start()
+    writer.stop()
+    assert not writer.is_alive()
+    assert writer.error is None
+    files = sorted(tmp_path.iterdir())
+    assert len(files) == 3
+    assert all(file.stat().st_size <= 180 for file in files)
+    for file in files:
+        rows = [json.loads(line) for line in file.read_text(encoding="utf-8").splitlines()]
+        assert rows[0] == metadata
+    assert json.loads(path.read_text(encoding="utf-8").splitlines()[-1])["sequence"] == 11
+
+
+def test_writer_retains_only_recent_runs_and_backups(tmp_path: Path) -> None:
+    for run in range(4):
+        writer = JsonlTelemetryWriter(tmp_path / f"run-{run}.jsonl", max_bytes=100, backup_count=1, run_count=2)
+        for sequence in range(5):
+            assert writer.submit({"sequence": sequence, "data": "x" * 30})
+        writer.start()
+        writer.stop()
+        assert writer.error is None
+    assert {path.name for path in tmp_path.iterdir()} == {
+        "run-2.jsonl", "run-2.jsonl.1", "run-3.jsonl", "run-3.jsonl.1",
+    }
+    assert sum(path.stat().st_size for path in tmp_path.iterdir()) <= 400
+
+
+def test_writer_drops_oversized_record_without_exceeding_limit(tmp_path: Path) -> None:
+    writer = JsonlTelemetryWriter(tmp_path / "run.jsonl", max_bytes=100, backup_count=1)
+    assert writer.submit({"data": "x" * 200})
+    assert writer.submit({"sequence": 1})
+    writer.start()
+    writer.stop()
+    assert writer.dropped == 1
+    assert writer.error is None
+    assert json.loads(writer.path.read_text(encoding="utf-8")) == {"sequence": 1}
+
+
+def test_writer_recovers_metadata_when_reopened_before_rotation(tmp_path: Path) -> None:
+    path = tmp_path / "run.jsonl"
+    metadata = {"type": "metadata", "model_pack": "pi4_fp32"}
+    first = JsonlTelemetryWriter(path, max_bytes=100, backup_count=1)
+    first.submit(metadata)
+    first.submit({"sequence": 1})
+    first.start()
+    first.stop()
+    second = JsonlTelemetryWriter(path, max_bytes=100, backup_count=1)
+    for sequence in range(2, 10):
+        second.submit({"sequence": sequence})
+    second.start()
+    second.stop()
+    for file in tmp_path.iterdir():
+        assert json.loads(file.read_text(encoding="utf-8").splitlines()[0]) == metadata
+
+
+def test_writer_drains_pending_when_stop_arrives_during_flush_clock(tmp_path: Path, monkeypatch) -> None:
+    writer = JsonlTelemetryWriter(tmp_path / "run.jsonl", batch_size=5, flush_interval=60)
+    final = {"type": "final", "sequence": 1}
+    assert writer.submit(final)
+    calls = 0
+
+    def clock():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            assert writer._queue.empty()
+            writer._stop.set()
+        return 0.0
+
+    monkeypatch.setattr("pi4_attendance.telemetry.time.monotonic", clock)
+    writer._run()
+    assert writer.error is None
+    assert writer.dropped == 0
+    assert [json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()] == [final]

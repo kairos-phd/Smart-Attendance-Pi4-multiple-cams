@@ -26,6 +26,7 @@ from .embedding_catalog import EmbeddingCatalog
 from .frame_queue import FairFrameQueue
 from .images import crop_face
 from .models import FrameCandidate, Observation, RecognitionDecision, utc_now
+from .preview import PreviewWindow
 from .recognition import RecognitionPolicy
 from .storage import PiStore
 from .telemetry import JsonlTelemetryWriter, ProcSampler, RollingMetrics, TelemetryMonitor
@@ -83,18 +84,14 @@ class AttendanceRuntime:
         )
         self.frames = FairFrameQueue([camera.camera_id for camera in settings.cameras], settings.frame_queue_size)
         self.stop_event = threading.Event()
-        if preview:
-            from .preview import PreviewWindow
-
-            self.preview = PreviewWindow(
-                tuple(camera.camera_id for camera in settings.cameras),
-                settings.preview_fps,
-                lambda name, student_id, images: self.enroll(name, student_id, images, "hdmi-preview"),
-            )
-        else:
-            self.preview = None
-        self.recognition_enabled = self.preview.recognition_enabled if self.preview is not None else threading.Event()
-        if self.preview is None:
+        self._show_preview = preview
+        self.preview = PreviewWindow(
+            tuple(camera.camera_id for camera in settings.cameras),
+            settings.preview_fps,
+            self.enroll,
+        )
+        self.recognition_enabled = self.preview.recognition_enabled
+        if not preview:
             self.recognition_enabled.set()
         self.inference_lock = threading.RLock()
         self._enrollment_lock = threading.Lock()
@@ -118,18 +115,15 @@ class AttendanceRuntime:
         self._telemetry_writer: JsonlTelemetryWriter | None = None
         self._telemetry_monitor: TelemetryMonitor | None = None
         self._telemetry_run_id = ""
-        if preview:
-            self._telemetry_run_id = f"{utc_now().strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}"
-            self.performance_log_path = (
-                settings.data_root / "performance" / f"{self._telemetry_run_id}.jsonl"
-            )
-            self._telemetry_writer = JsonlTelemetryWriter(self.performance_log_path)
-            self._telemetry_monitor = TelemetryMonitor(
-                ProcSampler(),
-                self.performance_metrics,
-                self._telemetry_writer,
-                run_id=self._telemetry_run_id,
-            )
+        self._telemetry_run_id = f"{utc_now().strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}"
+        self.performance_log_path = settings.data_root / "performance" / f"{self._telemetry_run_id}.jsonl"
+        self._telemetry_writer = JsonlTelemetryWriter(self.performance_log_path)
+        self._telemetry_monitor = TelemetryMonitor(
+            ProcSampler(),
+            self.performance_metrics,
+            self._telemetry_writer,
+            run_id=self._telemetry_run_id,
+        )
         self._embedding_catalog = EmbeddingCatalog.from_users([], self.engine.model_version)
 
     def _refresh_embedding_catalog(self) -> None:
@@ -148,9 +142,9 @@ class AttendanceRuntime:
                 self.stop_event,
                 self._camera_status,
                 recognition_enabled=self.recognition_enabled,
-                on_preview_frame=None if self.preview is None else self.preview.submit,
-                preview_selected=None if self.preview is None else self.preview.is_selected,
-                preview_fps=None if self.preview is None else self.settings.preview_fps,
+                on_preview_frame=self.preview.submit,
+                preview_selected=self.preview.is_selected,
+                preview_fps=self.settings.preview_fps if self._show_preview else None,
                 metrics=self.performance_metrics,
             )
             for camera in self.settings.cameras
@@ -390,7 +384,11 @@ class AttendanceRuntime:
         import uvicorn
 
         config = uvicorn.Config(
-            create_app(self), host=self.settings.api_host, port=self.settings.api_port, log_level="info"
+            create_app(self),
+            host=self.settings.api_host,
+            port=self.settings.api_port,
+            log_level="info",
+            proxy_headers=False,
         )
         self._api_server = uvicorn.Server(config)
         self._api_server.run()
@@ -421,6 +419,7 @@ class AttendanceRuntime:
             "dropped_frames": sum(int(row.get("dropped_frames", 0)) for row in current_rows),
             "runtime_metrics": self.metrics.snapshot(),
             "performance_metrics": self.performance_metrics.snapshot(),
+            "system": None if telemetry_monitor is None else telemetry_monitor.latest_sample,
             "performance_log": None if self.performance_log_path is None else str(self.performance_log_path),
             "telemetry": {
                 "monitor_alive": telemetry_monitor is not None and telemetry_monitor.is_alive(),
@@ -439,6 +438,51 @@ class AttendanceRuntime:
 
     def attendance(self, limit: int) -> list[dict]:
         return self.store.recent_attendance(limit)
+
+    def control_status(self) -> dict:
+        result = self.preview.status()
+        camera_lock = getattr(self, "_camera_cloud_lock", None)
+        if camera_lock is None:
+            online_camera_ids = []
+        else:
+            with camera_lock:
+                online_camera_ids = sorted(self._online_camera_ids)
+        result.update(
+            runtime_state=getattr(self, "_runtime_state", "starting"),
+            online_camera_ids=online_camera_ids,
+        )
+        return result
+
+    def select_camera(self, camera_id: str) -> dict:
+        self.preview.select_camera(camera_id)
+        return self.control_status()
+
+    def set_recognition(self, enabled: bool) -> dict:
+        self.preview.set_recognition(enabled)
+        return self.control_status()
+
+    def begin_enrollment(self, name: str, student_id: str, actor: str) -> dict:
+        if not self.preview.begin_enrollment(name, student_id, actor):
+            status = self.preview.status()
+            if status["enrollment"] is not None or status["enrollment_busy"]:
+                raise FileExistsError("Enrollment already in progress")
+            raise ValueError(self.preview.enrollment_status or "Enrollment already in progress")
+        return self.control_status()
+
+    def capture_enrollment_frame(self) -> dict:
+        if not self.preview.capture_enrollment_frame():
+            raise ValueError(self.preview.enrollment_status or "Cannot capture enrollment frame")
+        return self.control_status()
+
+    def submit_enrollment(self) -> dict:
+        if not self.preview.submit_enrollment():
+            raise ValueError(self.preview.enrollment_status or "Cannot submit enrollment")
+        return self.control_status()
+
+    def cancel_enrollment(self) -> dict:
+        if not self.preview.cancel_enrollment():
+            raise ValueError(self.preview.enrollment_status or "Cannot cancel enrollment")
+        return self.control_status()
 
     def enroll(self, name: str, student_id: str, images: list[np.ndarray], actor: str) -> dict:
         if not self._enrollment_lock.acquire(blocking=False):
@@ -518,12 +562,11 @@ class AttendanceRuntime:
     def run(self) -> None:
         self.start()
         try:
-            preview = getattr(self, "preview", None)
-            if preview is None:
+            if not getattr(self, "_show_preview", hasattr(self, "preview")):
                 while not self.stop_event.wait(1):
                     pass
             else:
-                preview.run(self.stop_event)
+                self.preview.run(self.stop_event)
         finally:
             self.stop()
             for worker in self._workers:

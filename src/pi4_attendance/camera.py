@@ -68,7 +68,7 @@ class CameraWorker(threading.Thread):
             self.metrics.set_gauge(f"{prefix}.width", frame.shape[1])
             self.metrics.set_gauge(f"{prefix}.height", frame.shape[0])
             self.metrics.set_gauge("recognition_enabled", self.recognition_enabled.is_set())
-        if self.on_preview_frame is not None and self.preview_selected is not None and self.preview_selected(self.camera.camera_id):
+        if self.on_preview_frame is not None:
             self.on_preview_frame(self.camera.camera_id, frame)
         prefix = f"camera.{self.camera.camera_id}"
         if not self.recognition_enabled.is_set():

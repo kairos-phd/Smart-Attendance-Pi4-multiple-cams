@@ -24,7 +24,7 @@ class ReplacingFrameSink(FrameSink):
         return True
 
 
-def test_preview_frames_continue_while_recognition_is_disabled_and_sampling_stays_bounded() -> None:
+def test_all_camera_frames_publish_while_recognition_is_disabled_and_sampling_stays_bounded() -> None:
     recognition_enabled = threading.Event()
     metrics = RollingMetrics()
     output = FrameSink()
@@ -38,7 +38,7 @@ def test_preview_frames_continue_while_recognition_is_disabled_and_sampling_stay
         lambda *args: None,
         recognition_enabled=recognition_enabled,
         on_preview_frame=lambda camera_id, frame: previews.append((camera_id, frame.copy())),
-        preview_selected=lambda camera_id: True,
+        preview_selected=lambda camera_id: False,
         preview_fps=30.0,
         metrics=metrics,
     )

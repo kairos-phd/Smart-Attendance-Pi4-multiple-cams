@@ -106,7 +106,7 @@ To enroll from the preview, press `E` and enter the name and student ID. Press `
 
 ## Compare one, two, and three cameras
 
-`--preview` automatically creates one JSONL performance log per run in `/var/lib/sic-attendance/performance`. Monitoring samples once per second and writes through a bounded background queue, so telemetry cannot wait on the inference thread.
+The headless service and optional `--preview` each create a JSONL performance log per run in `/var/lib/sic-attendance/performance`. Use the service for unattended benchmark collection; preview only adds a selected-camera display. Monitoring samples once per second and writes through a bounded background queue, so telemetry cannot wait on the inference thread.
 
 For each camera count, set `CAMERA_COUNT` in `.env`, keep the same selected preview camera, start the preview, press `A`, reproduce the same motion/face workload for 10–15 minutes, then press `Q`. Warm up for two minutes and repeat each configuration three times.
 

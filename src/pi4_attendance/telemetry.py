@@ -178,8 +178,16 @@ class JsonlTelemetryWriter:
         queue_size: int = 256,
         batch_size: int = 5,
         flush_interval: float = 5.0,
+        max_bytes: int = 8 * 1024 * 1024,
+        backup_count: int = 2,
+        run_count: int = 3,
     ) -> None:
+        if max_bytes <= 0 or backup_count < 0 or run_count < 1:
+            raise ValueError("Telemetry storage limits must be finite and positive")
         self.path = Path(path)
+        self._max_bytes = max_bytes
+        self._backup_count = backup_count
+        self._run_count = run_count
         self._queue: queue.Queue[dict] = queue.Queue(maxsize=queue_size)
         self._batch_size = batch_size
         self._flush_interval = flush_interval
@@ -228,29 +236,73 @@ class JsonlTelemetryWriter:
         return self._thread is not None and self._thread.is_alive()
 
     def _run(self) -> None:
+        output = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            runs = sorted(
+                (path for path in self.path.parent.glob("*.jsonl") if path != self.path),
+                key=lambda path: path.stat().st_mtime_ns,
+                reverse=True,
+            )
+            retained = {self.path, *runs[:self._run_count - 1]}
+            for path in self.path.parent.glob("*.jsonl*"):
+                stem, separator, suffix = path.name.partition(".jsonl")
+                if separator and (not suffix or (suffix.startswith(".") and suffix[1:].isdigit())):
+                    run = path.with_name(stem + ".jsonl")
+                    if run not in retained or (suffix and int(suffix[1:]) > self._backup_count) or path.stat().st_size > self._max_bytes:
+                        path.unlink()
             pending: list[dict] = []
             last_flush = time.monotonic()
-            with self.path.open("a", encoding="utf-8") as output:
-                while not self._stop.is_set() or not self._queue.empty():
-                    try:
-                        pending.append(self._queue.get(timeout=0.1))
-                    except queue.Empty:
-                        pass
-                    if pending and (
-                        len(pending) >= self._batch_size
-                        or self._stop.is_set()
-                        or time.monotonic() - last_flush >= self._flush_interval
-                    ):
-                        for record in pending:
-                            output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-                        output.flush()
-                        pending.clear()
-                        last_flush = time.monotonic()
+            metadata = b""
+            if self.path.exists() and self.path.stat().st_size:
+                with self.path.open("rb") as previous:
+                    first = previous.readline(self._max_bytes + 1)
+                if json.loads(first).get("type") == "metadata":
+                    metadata = first
+            output = self.path.open("ab")
+            size = output.tell()
+            while pending or not self._stop.is_set() or not self._queue.empty():
+                try:
+                    pending.append(self._queue.get(timeout=0.1))
+                except queue.Empty:
+                    pass
+                if pending and (
+                    len(pending) >= self._batch_size
+                    or self._stop.is_set()
+                    or time.monotonic() - last_flush >= self._flush_interval
+                ):
+                    for record in pending:
+                        line = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+                        if record.get("type") == "metadata":
+                            if len(line) >= self._max_bytes:
+                                raise ValueError("Telemetry metadata exceeds file size limit")
+                            metadata = line
+                        elif len(metadata) + len(line) > self._max_bytes:
+                            with self._drop_lock:
+                                self._dropped += 1
+                            continue
+                        if size + len(line) > self._max_bytes:
+                            output.close()
+                            for index in range(self._backup_count, 0, -1):
+                                source = self.path if index == 1 else self.path.with_name(f"{self.path.name}.{index - 1}")
+                                if source.exists():
+                                    source.replace(self.path.with_name(f"{self.path.name}.{index}"))
+                            output = self.path.open("wb")
+                            output.write(metadata)
+                            size = len(metadata)
+                            if line == metadata:
+                                continue
+                        output.write(line)
+                        size += len(line)
+                    output.flush()
+                    pending.clear()
+                    last_flush = time.monotonic()
         except Exception as exc:
             with self._drop_lock:
                 self._error = str(exc)
+        finally:
+            if output is not None:
+                output.close()
 
 
 class TelemetryMonitor:
@@ -270,12 +322,18 @@ class TelemetryMonitor:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._samples = 0
+        self._latest_sample: dict | None = None
         self._sample_lock = threading.Lock()
 
     @property
     def samples(self) -> int:
         with self._sample_lock:
             return self._samples
+
+    @property
+    def latest_sample(self) -> dict | None:
+        with self._sample_lock:
+            return None if self._latest_sample is None else dict(self._latest_sample)
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -308,5 +366,6 @@ class TelemetryMonitor:
             if not self._writer.submit(record):
                 self._metrics.increment("telemetry_dropped")
             with self._sample_lock:
+                self._latest_sample = dict(system)
                 self._samples += 1
             self._stop.wait(self._interval)

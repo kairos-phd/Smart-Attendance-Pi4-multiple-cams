@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import tkinter as tk
+from PIL import ImageTk
 
 from pi4_attendance.preview import PreviewWindow
 
@@ -26,13 +27,19 @@ def test_preview_keys_toggle_recognition_select_camera_and_quit() -> None:
     assert not preview.handle_key(27)
 
 
-def test_preview_keeps_only_latest_selected_camera_frame() -> None:
+def test_preview_keeps_latest_copied_frame_and_sequence_per_camera() -> None:
     preview = PreviewWindow(("camera-1", "camera-2"), 30.0)
     first = np.zeros((2, 2, 3), dtype=np.uint8)
     second = np.ones((2, 2, 3), dtype=np.uint8)
 
     preview.submit("camera-2", second)
     assert preview.latest_frame() is None
+    camera_2_frame, camera_2_sequence = preview.latest_sample("camera-2")
+    second[:] = 8
+    assert np.array_equal(camera_2_frame, np.ones((2, 2, 3), dtype=np.uint8))
+    camera_2_frame[:] = 7
+    assert np.array_equal(preview.latest_sample("camera-2")[0], np.ones((2, 2, 3), dtype=np.uint8))
+    assert camera_2_sequence == 1
     preview.submit("camera-1", first)
     first[:] = 9
 
@@ -44,6 +51,27 @@ def test_preview_keeps_only_latest_selected_camera_frame() -> None:
 
     assert first_sequence == same_sequence
     assert second_sequence == first_sequence + 1
+    assert preview.latest_sample("camera-2")[1] == camera_2_sequence
+
+
+def test_preview_selects_known_camera_and_sets_recognition_exactly() -> None:
+    preview = PreviewWindow(("camera-1", "camera-2"), 30.0)
+
+    assert preview.set_recognition(True) is True
+    assert preview.set_recognition(True) is True
+    assert preview.set_recognition(False) is False
+    assert preview.select_camera("camera-2") == "camera-2"
+    with pytest.raises(ValueError, match="Unknown camera"):
+        preview.select_camera("camera-3")
+
+    assert preview.status() == {
+        "camera_ids": ["camera-1", "camera-2"],
+        "selected_camera_id": "camera-2",
+        "recognition_enabled": False,
+        "enrollment": None,
+        "enrollment_busy": False,
+        "enrollment_status": "",
+    }
 
 
 def test_preview_recognition_is_scoped_to_camera_and_expires(monkeypatch) -> None:
@@ -109,8 +137,8 @@ def test_preview_run_closes_window_when_stop_is_requested(monkeypatch) -> None:
         def configure(self, **options):
             self.configured.update(options)
 
-    monkeypatch.setattr("pi4_attendance.preview.tk.Tk", Root)
-    monkeypatch.setattr("pi4_attendance.preview.tk.Label", Label)
+    monkeypatch.setattr(tk, "Tk", Root)
+    monkeypatch.setattr(tk, "Label", Label)
 
     preview.run(stop)
 
@@ -170,9 +198,9 @@ def test_switching_to_camera_without_a_frame_clears_stale_image_and_identity(mon
         def configure(self, **options):
             self.configured.update(options)
 
-    monkeypatch.setattr("pi4_attendance.preview.tk.Tk", Root)
-    monkeypatch.setattr("pi4_attendance.preview.tk.Label", Label)
-    monkeypatch.setattr("pi4_attendance.preview.ImageTk.PhotoImage", lambda image: object())
+    monkeypatch.setattr(tk, "Tk", Root)
+    monkeypatch.setattr(tk, "Label", Label)
+    monkeypatch.setattr(ImageTk, "PhotoImage", lambda image: object())
 
     preview.run(stop)
 
@@ -183,7 +211,7 @@ def test_switching_to_camera_without_a_frame_clears_stale_image_and_identity(mon
 
 def test_preview_without_desktop_has_clear_error(monkeypatch) -> None:
     preview = PreviewWindow(("camera-1",), 30.0)
-    monkeypatch.setattr("pi4_attendance.preview.tk.Tk", lambda: (_ for _ in ()).throw(tk.TclError("no display")))
+    monkeypatch.setattr(tk, "Tk", lambda: (_ for _ in ()).throw(tk.TclError("no display")))
 
     with pytest.raises(RuntimeError, match="Pi desktop"):
         preview.run(threading.Event())
@@ -215,19 +243,19 @@ def test_preview_validates_enrollment_identity() -> None:
     assert not PreviewWindow(("camera-1",), 30.0).begin_enrollment("User", "x" * 81)
 
 
-def test_preview_submits_enrollment_in_background() -> None:
+def test_preview_submits_enrollment_in_background_with_actor() -> None:
     started = threading.Event()
     release = threading.Event()
     received = []
 
-    def enroll(name, student_id, images):
+    def enroll(name, student_id, images, actor):
         started.set()
         assert release.wait(1)
-        received.append((name, student_id, images))
+        received.append((name, student_id, images, actor))
         return {"status": "active"}
 
     preview = PreviewWindow(("camera-1",), 30.0, enroll)
-    preview.begin_enrollment("Dang", "S001")
+    preview.begin_enrollment("Dang", "S001", "local-console")
     for value in range(3):
         preview.submit("camera-1", np.full((2, 2, 3), value, dtype=np.uint8))
         assert preview.capture_enrollment_frame()
@@ -243,6 +271,7 @@ def test_preview_submits_enrollment_in_background() -> None:
 
     assert received[0][:2] == ("Dang", "S001")
     assert len(received[0][2]) == 3
+    assert received[0][3] == "local-console"
     assert preview.enrollment_progress is None
     assert preview.enrollment_status == "Enrollment complete"
 
@@ -324,7 +353,7 @@ def test_preview_ui_keys_start_capture_submit_and_cancel(monkeypatch) -> None:
     enrolled = threading.Event()
     preview = PreviewWindow(("camera-1",), 30.0, lambda *_: enrolled.set())
     responses = iter(("Dang", "S001", "Other", "S002"))
-    monkeypatch.setattr("pi4_attendance.preview.simpledialog.askstring", lambda *_, **__: next(responses))
+    monkeypatch.setattr("tkinter.simpledialog.askstring", lambda *_, **__: next(responses))
     root = object()
     stop = threading.Event()
 

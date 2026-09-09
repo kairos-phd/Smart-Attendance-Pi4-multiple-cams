@@ -1,18 +1,95 @@
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 import threading
+import time
 
 import cv2
+import httpx
 import numpy as np
+import uvicorn
 
 from pi4_attendance.models import Observation, RecognitionDecision, RegisteredUser
 from pi4_attendance.models import FrameCandidate
 from pi4_attendance.service import AttendanceRuntime, RuntimeMetrics
+from pi4_attendance.preview import PreviewWindow
 from pi4_attendance.embedding_catalog import EmbeddingCatalog
 from pi4_attendance.storage import PiStore
 from pi4_attendance.telemetry import RollingMetrics
 import pytest
+
+
+def test_headless_service_import_does_not_require_gui_modules() -> None:
+    script = """
+import sys
+
+class BlockGuiImports:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "tkinter" or fullname.startswith("tkinter.") or fullname == "PIL" or fullname.startswith("PIL."):
+            raise ModuleNotFoundError(f"blocked GUI module: {fullname}")
+        return None
+
+sys.meta_path.insert(0, BlockGuiImports())
+from pi4_attendance.service import AttendanceRuntime
+from pi4_attendance.preview import PreviewWindow
+
+state = PreviewWindow(("camera-1",), 30.0)
+state.set_recognition(True)
+assert state.status()["recognition_enabled"] is True
+assert AttendanceRuntime.control_status
+"""
+
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_api_server_ignores_forwarded_client_addresses(monkeypatch) -> None:
+    runtime = AttendanceRuntime.__new__(AttendanceRuntime)
+    runtime.settings = SimpleNamespace(
+        api_host="127.0.0.1",
+        api_port=8000,
+        api_cors_origins=[],
+        api_auth_mode="shared_token",
+        admin_shared_token="secret",
+    )
+    runtime.preview = PreviewWindow(("camera-1",), 30.0)
+    runtime._camera_cloud_lock = threading.Lock()
+    runtime._online_camera_ids = {"camera-1"}
+    runtime._runtime_state = "running"
+    statuses = []
+
+    class TestServer:
+        def __init__(self, config):
+            self.config = config
+
+        def run(self):
+            self.config.load()
+
+            async def exercise():
+                cases = (
+                    (("198.51.100.10", 41000), "127.0.0.1"),
+                    (("127.0.0.1", 41000), "198.51.100.10"),
+                )
+                for client_address, forwarded_address in cases:
+                    transport = httpx.ASGITransport(app=self.config.loaded_app, client=client_address)
+                    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+                        response = await client.get(
+                            "/api/control", headers={"X-Forwarded-For": forwarded_address}
+                        )
+                        statuses.append(response.status_code)
+
+            asyncio.run(exercise())
+
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+    monkeypatch.setattr(uvicorn, "Server", TestServer)
+
+    runtime._api_loop()
+
+    assert statuses == [403, 200]
 
 
 def test_runtime_metrics_report_latest_and_aggregate_latencies() -> None:
@@ -26,7 +103,10 @@ def test_runtime_metrics_report_latest_and_aggregate_latencies() -> None:
     }
 
 
-def test_preview_runtime_prepares_a_per_run_performance_log(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("show_preview", "recognition_enabled"), ((False, True), (True, False)))
+def test_every_runtime_prepares_shared_control_and_performance_log(
+    tmp_path: Path, show_preview: bool, recognition_enabled: bool
+) -> None:
     settings = SimpleNamespace(
         data_root=tmp_path,
         model_root=tmp_path,
@@ -47,8 +127,10 @@ def test_preview_runtime_prepares_a_per_run_performance_log(tmp_path: Path) -> N
         camera_trigger_cooldown_seconds=0.8,
     )
 
-    runtime = AttendanceRuntime(settings, preview=True)
+    runtime = AttendanceRuntime(settings, preview=show_preview)
 
+    assert runtime.preview is not None
+    assert runtime.recognition_enabled.is_set() is recognition_enabled
     assert runtime.performance_log_path.parent == tmp_path / "performance"
     assert runtime.performance_log_path.suffix == ".jsonl"
     assert runtime._telemetry_monitor is not None
@@ -114,7 +196,10 @@ def runtime_for_health(state="running", camera_rows=None, inference_alive=True):
     runtime.performance_metrics.increment("inference.processed")
     runtime.performance_log_path = Path("performance/run.jsonl")
     runtime._telemetry_writer = SimpleNamespace(is_alive=lambda: True, error=None, dropped=0)
-    runtime._telemetry_monitor = SimpleNamespace(is_alive=lambda: True)
+    runtime._telemetry_monitor = SimpleNamespace(
+        is_alive=lambda: True,
+        latest_sample={"cpu_percent": 12.5, "process_rss_mb": 128.0},
+    )
     return runtime
 
 
@@ -129,12 +214,43 @@ def test_health_exposes_metrics_and_persisted_dropped_frame_counter() -> None:
     assert health["runtime_metrics"]["inference_ms"]["aggregate"]["average"] == 20.0
     assert health["performance_metrics"]["counters"]["inference.processed"] == 1
     assert health["performance_log"] == str(Path("performance/run.jsonl"))
+    assert health["system"] == {"cpu_percent": 12.5, "process_rss_mb": 128.0}
     assert health["telemetry"] == {
         "monitor_alive": True,
         "writer_alive": True,
         "writer_error": None,
         "samples_dropped": 0,
     }
+
+
+def test_runtime_control_wrappers_use_shared_state_and_preserve_actor() -> None:
+    enrolled = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def enroll(name, student_id, images, actor):
+        started.set()
+        assert release.wait(1)
+        enrolled.append((name, student_id, images, actor))
+        return {}
+
+    runtime = AttendanceRuntime.__new__(AttendanceRuntime)
+    runtime.preview = PreviewWindow(("camera-1", "camera-2"), 30.0, enroll)
+    runtime.recognition_enabled = runtime.preview.recognition_enabled
+
+    assert runtime.set_recognition(True)["recognition_enabled"] is True
+    assert runtime.select_camera("camera-2")["selected_camera_id"] == "camera-2"
+    assert runtime.begin_enrollment("Dang", "S001", "local-api")["enrollment"]["name"] == "Dang"
+    for value in range(3):
+        runtime.preview.submit("camera-2", np.full((2, 2, 3), value, dtype=np.uint8))
+        assert runtime.capture_enrollment_frame()["enrollment"]["captured"] == value + 1
+    assert runtime.submit_enrollment()["enrollment_busy"] is True
+    assert started.wait(1)
+    release.set()
+    deadline = time.monotonic() + 1
+    while runtime.preview.enrollment_busy and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert enrolled[0][3] == "local-api"
 
 
 def test_accepted_decision_updates_preview_with_catalog_student_id() -> None:

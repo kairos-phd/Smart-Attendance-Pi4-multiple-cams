@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import ipaddress
+import re
 import struct
 import zlib
-from typing import Protocol
+from typing import Annotated, Protocol
 
 import cv2
 import numpy as np
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, StringConstraints
 
 from .auth import build_admin_dependency
 from .config import Settings
@@ -114,10 +121,55 @@ class RuntimeContext(Protocol):
     def attendance(self, limit: int) -> list[dict]: ...
     def enroll(self, name: str, student_id: str, images: list[np.ndarray], actor: str) -> dict: ...
     def set_user_status(self, user_id: str, user_status: str, actor: str) -> bool: ...
+    def control_status(self) -> dict: ...
+    def select_camera(self, camera_id: str) -> dict: ...
+    def set_recognition(self, enabled: bool) -> dict: ...
+    def begin_enrollment(self, name: str, student_id: str, actor: str) -> dict: ...
+    def capture_enrollment_frame(self) -> dict: ...
+    def submit_enrollment(self) -> dict: ...
+    def cancel_enrollment(self) -> dict: ...
+
+
+NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+class ControlUpdate(BaseModel):
+    camera_id: NonEmptyText | None = None
+    recognition_enabled: bool | None = None
+
+
+class EnrollmentStart(BaseModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+    student_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+
+
+def require_loopback(request: Request) -> None:
+    try:
+        hosts = request.headers.getlist("host")
+        if request.client is not None and ipaddress.ip_address(request.client.host).is_loopback and "origin" not in request.headers and len(hosts) == 1:
+            authority = re.fullmatch(r"(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.]+)(?::([0-9]{1,5}))?", hosts[0])
+            if authority is not None:
+                host, port = authority.groups()
+                if port is None or int(port) <= 65535:
+                    if host.lower() == "localhost":
+                        return
+                    address = ipaddress.ip_address(host.strip("[]"))
+                    if address.is_loopback and (address.version == 6) == host.startswith("["):
+                        return
+    except ValueError:
+        pass
+    raise HTTPException(status_code=403, detail="Local control access only")
 
 
 def create_app(runtime: RuntimeContext) -> FastAPI:
     app = FastAPI(title="SIC Pi 4 Attendance API", version="1.0.0")
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        if request.url.path == "/api/control" or request.url.path.startswith("/api/control/enrollment"):
+            return JSONResponse(status_code=400, content={"detail": jsonable_encoder(exc.errors())})
+        return await request_validation_exception_handler(request, exc)
+
     if runtime.settings.api_cors_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -143,6 +195,52 @@ def create_app(runtime: RuntimeContext) -> FastAPI:
     @app.get("/api/attendance")
     def attendance(limit: int = 100, _: str = Depends(require_admin)) -> list[dict]:
         return runtime.attendance(limit)
+
+    @app.get("/api/control", dependencies=[Depends(require_loopback)])
+    def control() -> dict:
+        return runtime.control_status()
+
+    @app.patch("/api/control", dependencies=[Depends(require_loopback)])
+    def update_control(update: ControlUpdate) -> dict:
+        result = None
+        try:
+            if update.camera_id is not None:
+                result = runtime.select_camera(update.camera_id)
+            if update.recognition_enabled is not None:
+                result = runtime.set_recognition(update.recognition_enabled)
+            return runtime.control_status() if result is None else result
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/control/enrollment/start", dependencies=[Depends(require_loopback)])
+    def start_control_enrollment(enrollment: EnrollmentStart) -> dict:
+        try:
+            return runtime.begin_enrollment(enrollment.name, enrollment.student_id, "local-console")
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/control/enrollment/capture", dependencies=[Depends(require_loopback)])
+    def capture_control_enrollment() -> dict:
+        try:
+            return runtime.capture_enrollment_frame()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/control/enrollment/submit", dependencies=[Depends(require_loopback)])
+    def submit_control_enrollment() -> dict:
+        try:
+            return runtime.submit_enrollment()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/control/enrollment", dependencies=[Depends(require_loopback)])
+    def cancel_control_enrollment() -> dict:
+        try:
+            return runtime.cancel_enrollment()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/users", status_code=status.HTTP_201_CREATED)
     def enroll(

@@ -42,7 +42,7 @@ v4l2-ctl --device="$CAM" --list-formats-ext
 v4l2-ctl --device="$CAM" --set-fmt-video=width=640,height=480,pixelformat=MJPG --set-parm=30 --stream-mmap=3 --stream-count=120 --stream-to=/dev/null
 ```
 
-Keep `CAMERA_COUNT=1` while only camera 1 is connected. To add camera 2 or 3, set `CAMERA_COUNT` to `2` or `3` and fill the matching entries:
+Set `CAMERA_COUNT=1`, `2`, or `3` only when `.env` has a matching stable `/dev/v4l/by-id` entry for every enabled camera. Keep `CAMERA_COUNT=1` while only camera 1 is connected. To add camera 2 or 3, set `CAMERA_COUNT` to `2` or `3` and fill the matching entries:
 
 ```dotenv
 CAMERA_COUNT=3
@@ -80,14 +80,6 @@ Place at least 20 representative, consented calibration images under the microSD
   --accept-insightface-noncommercial-license
 ```
 
-Benchmark on the Pi:
-
-```bash
-.venv/bin/sic-pi4-benchmark \
-  --model-root /opt/sic-attendance \
-  --dataset /var/lib/sic-attendance/calibration
-```
-
 Keep `MODEL_PACK=pi4_fp32` unless the INT8 benchmark and recognition evaluation pass. Then test manually:
 
 ```bash
@@ -95,9 +87,43 @@ Keep `MODEL_PACK=pi4_fp32` unless the INT8 benchmark and recognition evaluation 
 .venv/bin/sic-pi4
 ```
 
+## Production runtime and headless console
+
+One `sic-pi4` runtime owns all configured 1–3 cameras, the shared `FairFrameQueue`, one InsightFace worker, recognition policy, SQLite, cloud outbox, and Firebase sync. All configured cameras recognize simultaneously. The console panes are loopback clients only; they never start another runtime or own a camera.
+
+For headless operation, start the service, then attach the console:
+
+```bash
+sudo systemctl start sic-pi4-attendance
+sic-console
+```
+
+The tmux layout is left `sic-pi4-control`, top-right `sic-pi4-performance`, and bottom-right `sic-pi4-attendance-log`. The control pane keys are `A` recognition toggle, `E` enrollment start, `1`/`2`/`3` camera selection, `C` capture, `Enter` submit, `X` cancel, and `Q` close console client. `Q` closes only the console client, not `sic-pi4-attendance`.
+
+Headless enrollment reuses the selected camera's latest `CameraWorker` frame once per sequence and never reopens a camera. The attendance viewer labels cosine similarity as `Similarity`, not a confidence percentage.
+
+Headless and preview runtimes write 1 Hz JSONL telemetry through a bounded nonblocking writer under `DATA_ROOT/performance`. Logs rotate at 8 MiB with two backups per run and retain the three newest runs (at most 72 MiB); rotation keeps model/camera metadata and removes expired diagnostic logs. Inspect a running service with:
+
+```bash
+sic-pi4-performance --once
+LOG=$(ls -1t /var/lib/sic-attendance/performance/*.jsonl | head -n 1)
+tail -n 1 "$LOG" | python3 -m json.tool
+curl http://127.0.0.1:8080/health | python3 -m json.tool
+```
+
+## Target-Pi benchmark
+
+The benchmark reads dataset images and does not own cameras. Stop the service to avoid CPU/RAM contention and distorted measurements, then restart it afterward:
+
+```bash
+sudo systemctl stop sic-pi4-attendance
+.venv/bin/sic-pi4-benchmark --model-root /opt/sic-attendance --dataset /var/lib/sic-attendance/calibration
+sudo systemctl start sic-pi4-attendance
+```
+
 ## HDMI preview
 
-Close Guvcview and stop the background service before opening the integrated preview. Run this from a Terminal in the Pi desktop session, without `sudo`:
+Preview is optional: it shows one selected camera while every configured camera continues recognizing in the background. Close Guvcview and stop the background service before opening it; preview cannot run beside `sic-pi4-attendance` because both would own cameras. Run this from a Terminal in the Pi desktop session, without `sudo`:
 
 ```bash
 sudo apt install -y python3-tk
@@ -110,7 +136,7 @@ The selected camera previews at up to `PREVIEW_FPS=30`; recognition remains boun
 
 Press `E` to enroll from the preview, enter the name and student ID, then press `C` for each new view. Capture 3–8 clear views with one face in each frame. Press `Enter` to save or `X` to cancel. Enrollment runs in the background and the overlay shows its result. A successful enrollment is available to recognition immediately.
 
-Each preview run writes a nonblocking 1 Hz performance log under `DATA_ROOT/performance`. The first row describes the model, camera configuration, and requested resolution; later JSONL rows contain system CPU/RAM, process CPU/RSS, measured camera capture/enqueue rates, inference rate, queue pressure, and rolling latency percentiles. View the current log while recognition is running:
+Each headless or preview run writes a nonblocking 1 Hz performance log under `DATA_ROOT/performance`. The first row describes the model, camera configuration, and requested resolution; later JSONL rows contain system CPU/RAM, process CPU/RSS, measured camera capture/enqueue rates, inference rate, queue pressure, and rolling latency percentiles. View the current log while recognition is running:
 
 ```bash
 LOG=$(ls -1t /var/lib/sic-attendance/performance/*.jsonl | head -n 1)
@@ -125,6 +151,8 @@ curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8080/api/attendance?lim
 ```
 
 Restart unattended operation afterward with `sudo systemctl start sic-pi4-attendance`.
+
+Windows tests do not prove real Raspberry Pi 2/3-camera operation. Validate real cameras, latency, RAM, thermals, queue pressure, and recovery on the target Pi before production use.
 
 Install at boot only after every configured camera and enrollment have been verified:
 
