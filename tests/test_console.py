@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import tomllib
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -267,10 +268,16 @@ def test_performance_format_shows_all_metrics_and_missing_values() -> None:
     assert "Telemetry dropped samples: -" in missing
 
 
-def test_attendance_format_has_heading_and_decimal_similarity() -> None:
+def test_attendance_format_has_heading_and_decimal_similarity(monkeypatch) -> None:
     console = console_module()
+
+    class LocalDatetime(datetime):
+        def astimezone(self, tz=None):
+            return super().astimezone(tz or timezone(timedelta(hours=7)))
+
+    monkeypatch.setattr(console, "datetime", LocalDatetime, raising=False)
     output = console.format_attendance([{
-        "occurred_at": "2026-09-08T10:11:12+00:00",
+        "occurred_at": "2026-09-08T10:11:12.123456+00:00",
         "name": "Dang",
         "student_id": "S001",
         "camera_ids": ["camera-1", "camera-2"],
@@ -278,8 +285,52 @@ def test_attendance_format_has_heading_and_decimal_similarity() -> None:
     }])
 
     assert output.splitlines()[0] == "Time | Name | Student ID | Camera | Similarity"
-    assert "2026-09-08T10:11:12+00:00 | Dang | S001 | camera-1,camera-2 | 0.8123" in output
+    assert "2026-09-08 17:11:12 | Dang | S001 | camera-1,camera-2 | 0.8123" in output
     assert "%" not in output
+
+
+@pytest.mark.parametrize("value,expected", [("invalid time", "invalid time"), (None, "-"), ("", "-"), (123, "123")])
+def test_attendance_format_handles_malformed_and_missing_times(value, expected) -> None:
+    output = console_module().format_attendance([{"occurred_at": value, "name": "Dang"}, {"name": "Missing"}])
+    assert f"{expected} | Dang |" in output
+    assert "- | Missing |" in output
+
+
+@pytest.mark.parametrize("timestamp", ["0001-01-01T00:00:00+00:00", "9999-12-31T23:59:59+00:00"])
+def test_attendance_format_preserves_time_when_os_conversion_fails(monkeypatch, timestamp) -> None:
+    console = console_module()
+
+    class UnsupportedLocalDatetime(datetime):
+        def astimezone(self, tz=None):
+            raise OSError("Local timezone conversion outside platform range")
+
+    monkeypatch.setattr(console, "datetime", UnsupportedLocalDatetime)
+    output = console.format_attendance([{"occurred_at": timestamp, "name": "Dang"}])
+    assert f"{timestamp} | Dang |" in output
+
+
+@pytest.mark.parametrize("options,interval", [([], 1.0), (["--interval", "2.5"], 2.5)])
+def test_attendance_client_polls_recognitions_with_token(monkeypatch, capsys, options, interval) -> None:
+    console = console_module()
+    calls = []
+    sleeps = []
+
+    def open_request(request, timeout):
+        calls.append((request.full_url, request.get_header("Authorization")))
+        return Response([])
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(console._OPENER, "open", open_request)
+    monkeypatch.setattr(console.time, "sleep", sleep)
+    with pytest.raises(KeyboardInterrupt):
+        console.attendance_main(["--token", "secret", "--limit", "7", *options])
+    assert calls == [("http://127.0.0.1:8080/api/recognitions?limit=7", "Bearer secret")] * 2
+    assert sleeps == [interval, interval]
+    assert capsys.readouterr().out.count("Time | Name | Student ID | Camera | Similarity") == 2
 
 
 def test_viewers_fit_small_panes_and_keep_newest_attendance(monkeypatch) -> None:
@@ -348,7 +399,7 @@ def test_attendance_caps_physical_rows_in_narrow_pane(monkeypatch) -> None:
     output = console.format_attendance(rows)
     assert sum(max(1, (len(line) + 58) // 59) for line in output.splitlines()) <= 10
     assert output.startswith("Time | Name | Student ID | Camera | Similarity")
-    assert "10:00:07+00:00 | Nguyen Van A | S007 | camera-1 | 0.8123" in output
+    assert output.splitlines()[1].endswith(" | Nguyen Van A | S007 | camera-1 | 0.8123")
     assert "S000" not in output
 
 
@@ -371,7 +422,7 @@ def test_attendance_keeps_oversized_newest_row_with_wide_characters_visible(monk
                 occupied = 0
             occupied += cells
     assert physical_rows <= 9
-    assert "10:00:07+00:00 | 界" in output
+    assert " | 界" in output.splitlines()[1]
     assert output.endswith("…")
     assert "Old" not in output
 
@@ -435,6 +486,12 @@ def test_console_repairs_named_clients_in_existing_tmux_session(monkeypatch, mis
     assert console.console_main() == 0
     assert calls[0] == ["tmux", "has-session", "-t", "=sic"]
     assert calls[-1] == ["tmux", "attach-session", "-t", "=sic"]
+    control_pane = next(pane for pane, (name, _) in panes.items() if name == commands[0])
+    assert calls[-2] == ["tmux", "select-pane", "-t", control_pane]
+    assert ["tmux", "set-option", "-t", "=sic", "mouse", "on"] in calls
+    assert ["tmux", "set-option", "-w", "-t", "@4", "pane-border-status", "top"] in calls
+    assert ["tmux", "set-option", "-w", "-t", "@4", "pane-border-format",
+            "#{pane_title} #{?pane_active,ACTIVE,}"] in calls
     assert sorted(name for name, stopped in panes.values() if not stopped) == sorted(commands)
     assert any("remain-on-exit" in call and "on" in call for call in calls)
     assert not any(call[1].startswith("kill-") for call in calls)
@@ -474,6 +531,11 @@ def test_console_creates_three_panes_when_session_is_missing(monkeypatch) -> Non
     ]
     assert any("remain-on-exit" in argv and "@4" in argv for argv in argv_calls)
     assert argv_calls[-1] == ["tmux", "attach-session", "-t", "=sic"]
+    assert argv_calls[-2] == ["tmux", "select-pane", "-t", "%7"]
+    assert ["tmux", "set-option", "-t", "=sic", "mouse", "on"] in argv_calls
+    assert ["tmux", "set-option", "-w", "-t", "@4", "pane-border-status", "top"] in argv_calls
+    assert ["tmux", "set-option", "-w", "-t", "@4", "pane-border-format",
+            "#{pane_title} #{?pane_active,ACTIVE,}"] in argv_calls
 
 
 def test_console_reports_missing_tmux_and_command_errors(monkeypatch, capsys) -> None:
@@ -529,17 +591,76 @@ def test_all_clients_validate_url_before_running(monkeypatch, command, extra) ->
         getattr(console, command)(["--url", "https://example.com", *extra])
 
 
-def test_control_screen_preserves_action_error_until_next_render(monkeypatch) -> None:
+@pytest.mark.parametrize("width", [40, 59])
+@pytest.mark.parametrize("height", [10, 24])
+@pytest.mark.parametrize("enrollment_status", ["Capture at least 3 images", "界" * 40])
+def test_control_screen_wraps_help_to_expose_all_keys(monkeypatch, width, height, enrollment_status) -> None:
     console = console_module()
     status = {
-        "camera_ids": ["camera-1"],
-        "recognition_enabled": False,
+        "runtime_state": "running",
+        "online_camera_ids": ["camera-1", "camera-2", "camera-3"],
+        "selected_camera_id": "camera-1",
+        "recognition_enabled": True,
+        "enrollment_status": enrollment_status,
+    }
+    monkeypatch.setattr(console, "request_json", lambda *args, **kwargs: status)
+    rendered = []
+
+    class Screen:
+        def timeout(self, value):
+            pass
+
+        def erase(self):
+            rendered.clear()
+
+        def getmaxyx(self):
+            return height, width
+
+        def addnstr(self, row, column, value, limit):
+            assert row < height and column == 0
+            assert limit == width - 1
+            assert len(value) <= limit
+            assert console._display_width(value) <= limit
+            rendered.append(value[:limit])
+
+        def refresh(self):
+            pass
+
+        def get_wch(self):
+            return "q"
+
+    console._control_screen(Screen(), console.DEFAULT_URL, SimpleNamespace(error=RuntimeError))
+    output = " ".join(rendered)
+    for key in ("[A]", "[E]", "[1/2/3]", "[C]", "[Enter]", "[X]", "[Q]"):
+        assert key in output
+    for field in ("Runtime: running", "Selected camera: camera-1", "Recognition: ON"):
+        assert field in output
+    if height == 24:
+        assert output.count("界") == enrollment_status.count("界")
+
+
+@pytest.mark.parametrize("failure", ["action", "poll"])
+def test_control_screen_preserves_action_error_until_next_render(monkeypatch, failure) -> None:
+    console = console_module()
+    status = {
+        "camera_ids": ["camera-1", "camera-2", "camera-3"],
+        "online_camera_ids": ["camera-1", "camera-2", "camera-3"],
+        "selected_camera_id": "camera-1",
+        "enrollment_status": "Capture at least 3 images",
+        "recognition_enabled": True,
         "runtime_state": "running",
     }
 
+    polls = 0
+
     def request_json(_base_url, path, *, method="GET", payload=None):
-        if path.endswith("capture"):
+        nonlocal polls
+        if path.endswith("capture") and failure == "action":
             raise RuntimeError("Wait for a new camera frame")
+        if method == "GET":
+            polls += 1
+            if failure == "poll" and polls > 1:
+                raise RuntimeError("Connection error: connection refused")
         return status
 
     monkeypatch.setattr(console, "request_json", request_json)
@@ -558,9 +679,11 @@ def test_control_screen_preserves_action_error_until_next_render(monkeypatch) ->
             self.current = []
 
         def getmaxyx(self):
-            return 20, 120
+            return 10, 40
 
-        def addnstr(self, _row, _column, value, _limit) -> None:
+        def addnstr(self, row, column, value, limit) -> None:
+            assert row < 10 and column == 0
+            assert limit == 39 and console._display_width(value) <= limit
             self.current.append(value)
 
         def refresh(self) -> None:
@@ -574,7 +697,13 @@ def test_control_screen_preserves_action_error_until_next_render(monkeypatch) ->
 
     console._control_screen(screen, "http://127.0.0.1:8080", curses_module)
 
-    assert "Error: Wait for a new camera frame" in screen.frames[1]
+    output = " ".join(screen.frames[1].splitlines())
+    expected = "Wait for a new camera frame" if failure == "action" else "Connection error: connection refused"
+    assert f"Error: {expected}" in output
+    for key in ("[A]", "[E]", "[1/2/3]", "[C]", "[Enter]", "[X]", "[Q]"):
+        assert key in output
+    for field in ("Runtime: running", "Selected camera: camera-1", "Recognition: ON"):
+        assert field in output
 
 
 def test_console_module_does_not_import_curses_at_import_time() -> None:

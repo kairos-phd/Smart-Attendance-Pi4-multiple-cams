@@ -26,6 +26,34 @@ def control_runtime(on_enroll=None) -> AttendanceRuntime:
     return runtime
 
 
+def test_recognitions_requires_admin_and_passes_bounded_limit() -> None:
+    runtime = control_runtime()
+    calls = []
+
+    def recognitions(limit):
+        calls.append(limit)
+        return [{"name": "Dang", "similarity": 0.8123}]
+
+    runtime.recognitions = recognitions
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=create_app(runtime), client=("192.0.2.10", 41000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            for headers in ({}, {"Authorization": "Bearer wrong"}):
+                assert (await client.get("/api/recognitions", headers=headers)).status_code == 401
+            assert calls == []
+            for query, limit in [("", 100), ("?limit=-1", 1), ("?limit=0", 1), ("?limit=2", 2), ("?limit=999", 500)]:
+                response = await client.get("/api/recognitions" + query, headers={"Authorization": "Bearer secret"})
+                assert response.status_code == 200
+                assert response.json() == [{"name": "Dang", "similarity": 0.8123}]
+                assert calls[-1] == limit
+            response = await client.get("/api/recognitions?limit=bad", headers={"Authorization": "Bearer secret"})
+            assert response.status_code == 422
+            assert calls == [100, 1, 1, 2, 500]
+
+    asyncio.run(exercise())
+
+
 def test_loopback_control_status_and_updates_use_shared_runtime_state() -> None:
     runtime = control_runtime()
 

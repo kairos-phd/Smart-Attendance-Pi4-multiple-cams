@@ -208,6 +208,22 @@ class PiStore:
             result.append(item)
         return result
 
+    def recent_recognitions(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT event.observed_at AS occurred_at,event.name,users.student_id,"
+                "event.camera_id,event.similarity_scaled "
+                "FROM recognition_events AS event LEFT JOIN users ON users.user_id=event.user_id "
+                "WHERE event.status='accepted' "
+                "ORDER BY event.observed_at DESC,event.observation_id DESC LIMIT ?",
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+        return [
+            {"occurred_at": row["occurred_at"], "name": row["name"], "student_id": row["student_id"],
+             "camera_ids": [row["camera_id"]], "similarity": row["similarity_scaled"] / 10_000}
+            for row in rows
+        ]
+
     def pending_attendance(self, limit: int = 50) -> list[RecognitionDecision]:
         with self._lock:
             rows = self._conn.execute(

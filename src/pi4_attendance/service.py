@@ -439,6 +439,9 @@ class AttendanceRuntime:
     def attendance(self, limit: int) -> list[dict]:
         return self.store.recent_attendance(limit)
 
+    def recognitions(self, limit: int) -> list[dict]:
+        return self.store.recent_recognitions(limit)
+
     def control_status(self) -> dict:
         result = self.preview.status()
         camera_lock = getattr(self, "_camera_cloud_lock", None)

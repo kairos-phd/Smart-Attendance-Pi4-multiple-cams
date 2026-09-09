@@ -22,6 +22,24 @@ from pi4_attendance.telemetry import RollingMetrics
 import pytest
 
 
+def test_runtime_recognitions_reads_accepted_events_during_cooldown(tmp_path: Path) -> None:
+    runtime = AttendanceRuntime.__new__(AttendanceRuntime)
+    runtime.store = PiStore(tmp_path)
+    try:
+        runtime.store.create_user("u1", "Dang", "S001", np.array([1], dtype=np.int8), 0.01, "model-v1")
+        for index in range(2):
+            runtime.store.record_decision(RecognitionDecision(
+                f"o{index}", "accepted", "u1", "Dang", f"camera-{index + 1}", datetime.now(timezone.utc),
+                0.8, 0.1, 0.9, 0.8, (1, 2, 3, 4), "model-v1", "thresholds_passed",
+            ), 300)
+        rows = runtime.recognitions(2)
+        assert [row["camera_ids"] for row in rows] == [["camera-2"], ["camera-1"]]
+        assert len(runtime.recognitions(1)) == 1
+        assert len(runtime.attendance(2)) == 1
+    finally:
+        runtime.store.close()
+
+
 def test_headless_service_import_does_not_require_gui_modules() -> None:
     script = """
 import sys

@@ -2,7 +2,7 @@ import tempfile
 import unittest
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +12,55 @@ from pi4_attendance.storage import PiStore
 
 
 class StorageTests(unittest.TestCase):
+    def test_recent_recognitions_keeps_cooldown_events_and_filters_rejections(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = PiStore(Path(directory))
+            try:
+                store.create_user("u1", "Dang", "S001", np.array([1, 2], dtype=np.int8), 0.01, "model-v1")
+                observed = datetime(2026, 9, 8, 10, 0, tzinfo=timezone.utc)
+                first = RecognitionDecision(
+                    "o1", "accepted", "u1", "Dang", "camera-1", observed,
+                    0.8123, 0.1, 0.9, 0.8, (1, 2, 3, 4), "model-v1", "thresholds_passed",
+                    decided_at=observed,
+                )
+                second = replace(first, observation_id="o2", camera_id="camera-2", similarity=0.9234,
+                                 observed_at=observed + timedelta(seconds=1), decided_at=observed + timedelta(seconds=2))
+                self.assertEqual(store.record_decision_result(first, 300), (True, "recorded"))
+                self.assertEqual(store.record_decision_result(second, 300), (False, "cooldown"))
+                store.record_decision(replace(second, observation_id="o3", status="rejected"), 300)
+
+                self.assertEqual(store.recent_recognitions(), [
+                    {"occurred_at": "2026-09-08T10:00:01+00:00", "name": "Dang", "student_id": "S001",
+                     "camera_ids": ["camera-2"], "similarity": 0.9234},
+                    {"occurred_at": "2026-09-08T10:00:00+00:00", "name": "Dang", "student_id": "S001",
+                     "camera_ids": ["camera-1"], "similarity": 0.8123},
+                ])
+                self.assertEqual(len(store.recent_attendance()), 1)
+                self.assertEqual(len(store.recognition_event_rows()), 3)
+                self.assertIn("similarity_scaled", store.recognition_event_rows()[0])
+            finally:
+                store.close()
+
+    def test_recent_recognitions_limits_and_timestamp_ties(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = PiStore(Path(directory))
+            try:
+                store.create_user("u1", "Dang", "S001", np.array([1], dtype=np.int8), 0.01, "model-v1")
+                decision = RecognitionDecision(
+                    "o", "accepted", "u1", "Dang", "camera-1", datetime(2026, 9, 8, tzinfo=timezone.utc),
+                    0.8, 0.1, 0.9, 0.8, (1, 2, 3, 4), "model-v1", "thresholds_passed",
+                )
+                for index in range(501):
+                    store.record_decision(replace(decision, observation_id=f"o{index:03d}", name=f"person-{index}"), 300)
+                self.assertEqual(len(store.recent_recognitions()), 100)
+                for limit, count in [(-1, 1), (0, 1), (2, 2), (501, 500)]:
+                    rows = store.recent_recognitions(limit)
+                    self.assertEqual(len(rows), count)
+                    self.assertEqual(rows[0]["name"], "person-500")
+                self.assertEqual(store.recent_recognitions(2)[1]["name"], "person-499")
+            finally:
+                store.close()
+
     def test_non_finite_recognition_metrics_are_not_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = PiStore(Path(directory))

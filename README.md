@@ -98,7 +98,7 @@ sudo systemctl start sic-pi4-attendance
 sic-console
 ```
 
-The tmux layout is left `sic-pi4-control`, top-right `sic-pi4-performance`, and bottom-right `sic-pi4-attendance-log`. The control pane keys are `A` recognition toggle, `E` enrollment start, `1`/`2`/`3` camera selection, `C` capture, `Enter` submit, `X` cancel, and `Q` close console client. `Q` closes only the console client, not `sic-pi4-attendance`.
+The tmux layout is left `sic-pi4-control`, top-right `sic-pi4-performance`, and bottom-right `sic-pi4-attendance-log`. The lower-right pane shows accepted recognitions in the Pi's local time, including repeated recognitions suppressed by the attendance cooldown, refreshing every second by default. Click the control pane and check its `ACTIVE` marker before using keys. The control pane keys are `A` recognition toggle, `E` enrollment start, `1`/`2`/`3` camera selection, `C` capture, `Enter` submit, `X` cancel, and `Q` close console client. `Q` closes only the console client, not `sic-pi4-attendance`.
 
 Headless enrollment reuses the selected camera's latest `CameraWorker` frame once per sequence and never reopens a camera. The attendance viewer labels cosine similarity as `Similarity`, not a confidence percentage.
 

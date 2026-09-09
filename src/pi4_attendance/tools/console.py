@@ -8,8 +8,10 @@ import os
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 from urllib import error, parse, request
@@ -158,6 +160,26 @@ def _display_width(text: str) -> int:
     return sum(0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in text)
 
 
+def _wrap_control_line(text: str, width: int) -> list[str]:
+    if width <= 0:
+        return [""]
+    lines = []
+    for segment in textwrap.wrap(text, width) or [""]:
+        line = ""
+        cells = 0
+        for char in segment:
+            size = _display_width(char)
+            if size > width:
+                char, size = "?", 1
+            if cells + size > width:
+                lines.append(line)
+                line, cells = "", 0
+            line += char
+            cells += size
+        lines.append(line)
+    return lines
+
+
 def format_performance(health: dict) -> str:
     system = health.get("system") or {}
     performance = health.get("performance_metrics") or {}
@@ -209,11 +231,18 @@ def format_attendance(rows: list[dict]) -> str:
     lines = ["Time | Name | Student ID | Camera | Similarity"]
     width, height = shutil.get_terminal_size(fallback=(120, 24))
     remaining = height - 1 - math.ceil(_display_width(lines[0]) / width)
-    for row in sorted(rows, key=lambda row: row.get("occurred_at") or "", reverse=True):
+    for row in sorted(rows, key=lambda row: str(row.get("occurred_at") or ""), reverse=True):
         similarity = row.get("similarity")
         similarity_text = "-" if similarity is None else f"{float(similarity):.4f}"
+        occurred_at = row.get("occurred_at") or "-"
+        try:
+            timestamp = datetime.fromisoformat(occurred_at)
+            if timestamp.tzinfo is not None:
+                occurred_at = timestamp.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
         line = (
-            f"{row.get('occurred_at', '-')} | {row.get('name', '-')} | {row.get('student_id', '-')} | "
+            f"{occurred_at} | {row.get('name', '-')} | {row.get('student_id', '-')} | "
             f"{','.join(row.get('camera_ids') or []) or '-'} | {similarity_text}"
         )
         wrap_width = max(1, width - int(any(unicodedata.east_asian_width(char) in {"W", "F"} for char in line)))
@@ -284,7 +313,7 @@ def attendance_main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     return _viewer(
-        lambda: request_json(args.url, f"/api/attendance?limit={args.limit}", token=token),
+        lambda: request_json(args.url, f"/api/recognitions?limit={args.limit}", token=token),
         format_attendance,
         args.interval,
         args.once,
@@ -318,7 +347,12 @@ def _control_screen(stdscr, base_url: str, curses_module) -> None:
             message = f"Error: {exc}"
         stdscr.erase()
         height, width = stdscr.getmaxyx()
-        for row, line in enumerate((format_control(status) + (f"\n{message}" if message else "")).splitlines()):
+        lines = format_control(status).splitlines()
+        help_lines = _wrap_control_line(lines.pop(), width - 1)
+        if message:
+            lines.insert(0, message)
+        wrapped = [segment for line in lines for segment in _wrap_control_line(line, width - 1)]
+        for row, line in enumerate(wrapped[:max(0, height - len(help_lines))] + help_lines):
             if row < height:
                 stdscr.addnstr(row, 0, line, max(0, width - 1))
         stdscr.refresh()
@@ -381,6 +415,9 @@ def console_main() -> int:
             panes[commands[0]] = (left, True)
         tmux("set-option", "-w", "-t", window, "remain-on-exit", "on")
         tmux("set-option", "-w", "-t", window, "automatic-rename", "off")
+        tmux("set-option", "-t", "=sic", "mouse", "on")
+        tmux("set-option", "-w", "-t", window, "pane-border-status", "top")
+        tmux("set-option", "-w", "-t", window, "pane-border-format", "#{pane_title} #{?pane_active,ACTIVE,}")
         for command in commands:
             if command not in panes:
                 if command == commands[0]:
