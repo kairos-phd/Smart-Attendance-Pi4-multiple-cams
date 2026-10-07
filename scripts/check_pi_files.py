@@ -50,13 +50,13 @@ def classify(path: Path, ctx: AuditContext) -> tuple[str, str]:
     references = ctx.references.get(path.name, []) + ctx.references.get(str(path), [])
     if references:
         return 'KEEP_REFERENCED', 'Referenced by: ' + ', '.join(sorted(set(references))[:5])
-    if re.search(r'\.bak(?:[._-]|$)|\.backup(?:[._-]|$)|~$', name):
+    if re.search(r'\.bak\d*(?:[._-]|$)|\.backup(?:[._-]|$)|~$', name):
         return 'ARCHIVE_CANDIDATE', 'No static project reference found; preserve a backup outside the runtime directory'
     if name.endswith('.deb'):
         return 'REVIEW_PACKAGE', 'Installer package; confirm package installation and recovery needs before archiving'
     if beneath(path, ctx.repo_root):
         rel = path.absolute().relative_to(ctx.repo_root.absolute())
-        if rel.parts and rel.parts[0] in ('src', 'scripts', 'deploy') or name in ('pyproject.toml', '.env.example', '.gitignore', 'readme.md'):
+        if rel.parts and rel.parts[0] in ('src', 'scripts', 'deploy', 'systemd') or name in ('pyproject.toml', '.env.example', '.gitignore', 'readme.md'):
             return 'KEEP_RUNTIME', 'Current source, runtime configuration template or deployment tool'
         if rel.parts and rel.parts[0] in ('tests', 'docs'):
             return 'KEEP_VALIDATION', 'Regression tests or operational documentation'
@@ -89,7 +89,8 @@ def references(repo: Path) -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     candidates = [p.name for p in walk(repo, False) if p.is_file()]
     suspect = {name for name in candidates if '.bak' in name or '.backup' in name or name.endswith('.deb')}
-    for root in (repo / 'src', repo / 'scripts', repo / 'deploy', repo / 'docs'):
+    # Documentation may list a backup for inspection; that is not runtime use.
+    for root in (repo / 'src', repo / 'scripts', repo / 'deploy', repo / 'systemd'):
         for path in walk(root, False):
             if not path.is_file() or path.suffix not in {'.py', '.sh', '.md', '.service', '.toml'} or path.stat().st_size > 1024 * 1024:
                 continue

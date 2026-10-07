@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import sys
+import pytest
 
 
 def audit_module():
@@ -34,9 +35,10 @@ def test_active_model_and_its_alias_are_kept(tmp_path):
     assert m.classify(alias,ctx)[0]=='KEEP_ACTIVE_MODEL'
 
 
-def test_unreferenced_code_backup_is_only_an_archive_candidate(tmp_path):
+@pytest.mark.parametrize('name', ['api.py.bak', 'api.py.bak2', 'face_engine.py.bak_before_qdq'])
+def test_unreferenced_code_backup_is_only_an_archive_candidate(tmp_path, name):
     m=audit_module(); ctx=context(m,tmp_path)
-    path=ctx.repo_root/'src'/'api.py.bak'
+    path=ctx.repo_root/'src'/name
     assert m.classify(path,ctx)[0]=='ARCHIVE_CANDIDATE'
     ctx.references[path.name]=['scripts/uses_backup.sh']
     assert m.classify(path,ctx)[0]=='KEEP_REFERENCED'
