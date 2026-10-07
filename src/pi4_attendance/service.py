@@ -74,7 +74,8 @@ class AttendanceRuntime:
         self.store = PiStore(settings.data_root)
         self.cloud = CloudSummary(settings)
         self.engine = FaceEngine(
-            settings.model_root, settings.model_pack, settings.face_det_size, settings.match_threshold, settings.match_margin
+            settings.model_root, settings.model_pack, settings.face_det_size, settings.match_threshold, settings.match_margin,
+            recognizer_model=getattr(settings, "recognizer_model", "auto"),
         )
         self.recognition_policy = RecognitionPolicy(
             settings.match_threshold,
@@ -266,13 +267,16 @@ class AttendanceRuntime:
                 candidate = self.frames.get(timeout=0.15)
             except queue.Empty:
                 continue
+
             if not self.recognition_enabled.is_set():
                 performance = getattr(self, "performance_metrics", None)
                 if performance is not None:
                     performance.increment("inference.recognition_disabled")
                 continue
+
             try:
                 processing_started = time.monotonic()
+
                 with self.inference_lock:
                     inference_started = time.monotonic()
                     observations = self.engine.recognize(
@@ -282,11 +286,15 @@ class AttendanceRuntime:
                         candidate.captured_monotonic,
                         candidate.captured_at,
                     )
+
                 inference_finished = time.monotonic()
+
                 queue_age_ms = (processing_started - candidate.captured_monotonic) * 1000.0
                 lock_wait_ms = (inference_started - processing_started) * 1000.0
                 inference_ms = (inference_finished - inference_started) * 1000.0
+
                 self.metrics.record(queue_age_ms, inference_ms)
+
                 performance = getattr(self, "performance_metrics", None)
                 if performance is not None:
                     performance.increment("inference.processed")
@@ -294,16 +302,46 @@ class AttendanceRuntime:
                     performance.observe("inference_lock_wait_ms", lock_wait_ms)
                     performance.observe("inference_ms", inference_ms)
                     performance.set_gauge("queue.depth", self.frames.qsize())
+
+                # =========================================================
+                # VẼ KHUNG KHUÔN MẶT CHO WEB PREVIEW
+                # =========================================================
+                preview = getattr(self, "preview", None)
+
+                if preview is not None and observations:
+                    preview_frame = candidate.frame.copy()
+
+                    for observation in observations:
+                        x1, y1, x2, y2 = observation.bbox
+
+                        cv2.rectangle(
+                            preview_frame,
+                            (int(x1), int(y1)),
+                            (int(x2), int(y2)),
+                            (0, 255, 0),
+                            2,
+                        )
+
+                    # Display annotations must not replace the raw enrollment sample.
+                    preview.submit_overlay(candidate.camera_id, preview_frame)
+
+                # =========================================================
+                # XỬ LÝ NHẬN DIỆN NHƯ CŨ
+                # =========================================================
                 for observation in observations:
                     self.store.record_observation(observation)
                     self._handle_decision(
-                        self.recognition_policy.decide(observation), observation, candidate.frame
+                        self.recognition_policy.decide(observation),
+                        observation,
+                        candidate.frame,
                     )
+
                 if performance is not None:
                     performance.observe(
                         "full_processing_ms",
                         (time.monotonic() - candidate.captured_monotonic) * 1000.0,
                     )
+
             except Exception:
                 LOG.exception("Inference failed for %s", candidate.camera_id)
 
@@ -383,15 +421,36 @@ class AttendanceRuntime:
     def _api_loop(self) -> None:
         import uvicorn
 
-        config = uvicorn.Config(
-            create_app(self),
-            host=self.settings.api_host,
-            port=self.settings.api_port,
-            log_level="info",
-            proxy_headers=False,
-        )
-        self._api_server = uvicorn.Server(config)
-        self._api_server.run()
+        # Create the FastAPI app first so the existing Firebase Auth
+        # dependency can initialize the Firebase [DEFAULT] app as before.
+        app = create_app(self)
+
+        webrtc_manager = None
+
+        try:
+            try:
+                from .webrtc import WebRTCManager
+                webrtc_manager = WebRTCManager(self)
+                webrtc_manager.start()
+                LOG.info("WebRTC signaling manager started")
+            except Exception:
+                LOG.exception(
+                    "WebRTC signaling manager failed to start; "
+                    "API will continue without WebRTC"
+                )
+
+            config = uvicorn.Config(
+                app,
+                host=self.settings.api_host,
+                port=self.settings.api_port,
+                log_level="info",
+                proxy_headers=False,
+            )
+            self._api_server = uvicorn.Server(config)
+            self._api_server.run()
+        finally:
+            if webrtc_manager is not None:
+                webrtc_manager.stop()
 
     def health(self) -> dict:
         camera_rows = self.store.camera_rows()
@@ -414,6 +473,7 @@ class AttendanceRuntime:
             "camera_count": len(self.settings.cameras),
             "queue_depth": self.frames.qsize(),
             "model_version": self.engine.model_version,
+            "model_info": getattr(self.engine, "model_info", {}),
             "inference_alive": inference_alive,
             "camera_status": current_rows,
             "dropped_frames": sum(int(row.get("dropped_frames", 0)) for row in current_rows),
@@ -534,7 +594,7 @@ class AttendanceRuntime:
                     name,
                     student_id,
                     embedding_q,
-                    scale,
+                   scale,
                     self.engine.model_version,
                     image_records,
                     actor,

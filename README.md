@@ -2,6 +2,8 @@
 
 This folder is the self-contained Raspberry Pi 4 deployment for realtime biometric attendance. The Pi performs capture, optional motion triggering, face detection, recognition, enrollment, decision metadata, and biometric storage. A local PC is not part of the runtime path.
 
+For an existing Pi with local source changes, follow [Cập nhật Pi và kiểm kê từng file](docs/PI_UPDATE_AND_FILE_AUDIT.md). It preserves local work, checks the actual model and embedding compatibility, and provides a read-only file inventory before cleanup.
+
 ## Decision rules
 
 - One or more uniquely identified cameras may be configured.

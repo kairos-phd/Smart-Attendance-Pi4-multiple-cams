@@ -78,14 +78,16 @@ def load_images(directory: Path, limit: int) -> list[BenchmarkSample]:
 
 
 def run_pack(
-    model_root: Path, pack: str, det_size: int, samples: list[BenchmarkSample], match_threshold: float
+    model_root: Path, pack: str, det_size: int, samples: list[BenchmarkSample], match_threshold: float,
+    *, recognizer_model: str | Path = "pack",
 ) -> dict:
-    from insightface.app import FaceAnalysis
+    from ..face_engine import FaceEngine
 
-    app = FaceAnalysis(name=pack, root=str(model_root), providers=["CPUExecutionProvider"])
-    app.prepare(ctx_id=-1, det_size=(det_size, det_size))
+    engine = FaceEngine(model_root, pack, det_size, match_threshold, 0.0,
+                        recognizer_model=recognizer_model)
+    engine.start()
     for sample in samples[:3]:
-        app.get(sample.image)
+        engine.analyze(sample.image)
     latencies = []
     detections = 0
     faces_by_sample: list[dict | None] = []
@@ -93,12 +95,12 @@ def run_pack(
     labels = [sample.label for sample in samples]
     for sample in samples:
         started = time.perf_counter()
-        faces = app.get(sample.image)
+        faces = engine.analyze(sample.image)
         latencies.append((time.perf_counter() - started) * 1000)
         detections += len(faces)
         if faces:
-            face = max(faces, key=lambda item: float(item.det_score))
-            embedding = np.asarray(face.normed_embedding, dtype=np.float32).tolist()
+            face, vector = max(faces, key=lambda item: float(item[0].det_score))
+            embedding = np.asarray(vector, dtype=np.float32).tolist()
             embeddings.append(embedding)
             faces_by_sample.append({"bbox": np.asarray(face.bbox, dtype=np.float32).tolist(), "embedding": embedding})
         else:
@@ -107,6 +109,9 @@ def run_pack(
     ordered = sorted(latencies)
     return {
         "pack": pack,
+        "model_version": engine.model_version,
+        "model_info": engine.model_info,
+        "images_without_faces": sum(value is None for value in embeddings),
         "images": len(samples),
         "detections": detections,
         "mean_ms": statistics.mean(latencies),
@@ -150,14 +155,18 @@ def main() -> None:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--reference", default="pi4_fp32")
     parser.add_argument("--candidate", default="pi4_int8")
+    parser.add_argument("--reference-recognizer", default="pack", help="pack, auto, or external ONNX path")
+    parser.add_argument("--candidate-recognizer", default="pack", help="pack, auto, or external ONNX path")
     parser.add_argument("--det-size", type=int, default=320)
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--match-threshold", type=float, default=0.45)
     parser.add_argument("--output", type=Path, default=Path("benchmarks/latest.json"))
     args = parser.parse_args()
     samples = load_images(args.dataset, args.limit)
-    reference = run_pack(args.model_root.resolve(), args.reference, args.det_size, samples, args.match_threshold)
-    candidate = run_pack(args.model_root.resolve(), args.candidate, args.det_size, samples, args.match_threshold)
+    reference = run_pack(args.model_root.resolve(), args.reference, args.det_size, samples, args.match_threshold,
+                         recognizer_model=args.reference_recognizer)
+    candidate = run_pack(args.model_root.resolve(), args.candidate, args.det_size, samples, args.match_threshold,
+                         recognizer_model=args.candidate_recognizer)
     result = {"reference": reference, "candidate": candidate, "comparison": compare(reference, candidate)}
     result["reference"].pop("faces")
     result["candidate"].pop("faces")
