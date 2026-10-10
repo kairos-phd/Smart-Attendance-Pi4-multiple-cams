@@ -382,7 +382,9 @@ class AttendanceRuntime:
             frames = [(observation, frame.copy())]
             relative_path = self._save_unknown(decision, frames) if self.settings.save_unknown_images else None
             self.store.record_unknown(uuid4().hex, decision, relative_path)
-            LOG.info("Recognition rejected: %s", decision.reason)
+            LOG.info("Recognition rejected: camera=%s status=%s reason=%s similarity=%.4f model_version=%s observation_id=%s",
+                     decision.camera_id, "unknown" if decision.reason in {"no_candidate", "similarity_below_threshold"} else "rejected",
+                     decision.reason, decision.similarity, decision.model_version, decision.observation_id)
 
     def _save_unknown(self, decision: RecognitionDecision, frames: list[tuple[Observation, np.ndarray]]) -> str | None:
         if not frames:
@@ -502,6 +504,9 @@ class AttendanceRuntime:
     def recognitions(self, limit: int) -> list[dict]:
         return self.store.recent_recognitions(limit)
 
+    def recognition_events(self, limit: int) -> list[dict]:
+        return self.store.recent_recognition_events(limit)
+
     def control_status(self) -> dict:
         result = self.preview.status()
         camera_lock = getattr(self, "_camera_cloud_lock", None)
@@ -522,6 +527,8 @@ class AttendanceRuntime:
 
     def set_recognition(self, enabled: bool) -> dict:
         self.preview.set_recognition(enabled)
+        LOG.info("Recognition control: recognition_enabled=%s model_version=%s model_changed=False",
+                 enabled, getattr(getattr(self, "engine", None), "model_version", "unavailable"))
         return self.control_status()
 
     def begin_enrollment(self, name: str, student_id: str, actor: str) -> dict:

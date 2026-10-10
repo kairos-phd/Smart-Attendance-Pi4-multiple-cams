@@ -328,6 +328,7 @@ class RuntimeContext(Protocol):
     def cameras(self) -> list[dict]: ...
     def attendance(self, limit: int) -> list[dict]: ...
     def recognitions(self, limit: int) -> list[dict]: ...
+    def recognition_events(self, limit: int) -> list[dict]: ...
     def enroll(self, name: str, student_id: str, images: list[np.ndarray], actor: str) -> dict: ...
     def set_user_status(self, user_id: str, user_status: str, actor: str) -> bool: ...
     def control_status(self) -> dict: ...
@@ -692,6 +693,26 @@ def create_app(runtime: RuntimeContext) -> FastAPI:
         _: str = Depends(require_admin),
     ) -> list[dict]:
         return runtime.recognitions(max(1, min(limit, 500)))
+
+    @app.get("/api/recognition-events")
+    def recognition_events(limit: int = 100, _: str = Depends(require_admin)) -> list[dict]:
+        return runtime.recognition_events(max(1, min(limit, 500)))
+
+    @app.get("/api/control/remote")
+    def remote_control(_: str = Depends(require_admin)) -> dict:
+        return runtime.control_status()
+
+    @app.patch("/api/control/remote")
+    def update_remote_control(update: ControlUpdate, _: str = Depends(require_admin)) -> dict:
+        try:
+            result = None
+            if update.camera_id is not None:
+                result = runtime.select_camera(update.camera_id)
+            if update.recognition_enabled is not None:
+                result = runtime.set_recognition(update.recognition_enabled)
+            return runtime.control_status() if result is None else result
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get(
         "/api/control",
