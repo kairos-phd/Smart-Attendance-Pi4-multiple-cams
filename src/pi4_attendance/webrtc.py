@@ -122,9 +122,14 @@ class WebRTCManager:
         try:
             return firebase_admin.get_app("sic-webrtc")
         except ValueError:
-            service_account = os.getenv("FIREBASE_SERVICE_ACCOUNT", "").strip()
-            project_id = os.getenv("FIREBASE_PROJECT_ID", "").strip()
-            database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
+            # Media may share the website's Firebase project while attendance
+            # keeps its existing credentials, database and model configuration.
+            service_account = (os.getenv("WEBRTC_FIREBASE_SERVICE_ACCOUNT", "").strip()
+                               or os.getenv("FIREBASE_SERVICE_ACCOUNT", "").strip())
+            project_id = (os.getenv("WEBRTC_FIREBASE_PROJECT_ID", "").strip()
+                          or os.getenv("FIREBASE_PROJECT_ID", "").strip())
+            database_url = (os.getenv("WEBRTC_FIREBASE_DATABASE_URL", "").strip()
+                            or os.getenv("FIREBASE_DATABASE_URL", "").strip())
 
             if not service_account or not database_url:
                 raise RuntimeError(
