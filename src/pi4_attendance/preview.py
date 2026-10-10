@@ -37,6 +37,9 @@ class PreviewWindow:
         self._samples: dict[str, tuple[np.ndarray | None, int]] = {
             camera_id: (None, 0) for camera_id in camera_ids
         }
+        self._display_samples: dict[str, tuple[np.ndarray | None, int]] = {
+            camera_id: (None, 0) for camera_id in camera_ids
+        }
         self._enrollment_name: str | None = None
         self._enrollment_student_id: str | None = None
         self._enrollment_actor: str | None = None
@@ -76,7 +79,24 @@ class PreviewWindow:
             if camera_id not in self._samples:
                 raise ValueError(f"Unknown camera: {camera_id}")
             _, sequence = self._samples[camera_id]
-            self._samples[camera_id] = (frame.copy(), sequence + 1)
+            copied = frame.copy()
+            self._samples[camera_id] = (copied, sequence + 1)
+            _, display_sequence = self._display_samples[camera_id]
+            self._display_samples[camera_id] = (copied, display_sequence + 1)
+
+    def submit_overlay(self, camera_id: str, frame: np.ndarray) -> None:
+        with self._lock:
+            if camera_id not in self._display_samples:
+                raise ValueError(f"Unknown camera: {camera_id}")
+            _, sequence = self._display_samples[camera_id]
+            self._display_samples[camera_id] = (frame.copy(), sequence + 1)
+
+    def latest_display_sample(self, camera_id: str) -> tuple[np.ndarray | None, int]:
+        with self._lock:
+            if camera_id not in self._display_samples:
+                raise ValueError(f"Unknown camera: {camera_id}")
+            frame, sequence = self._display_samples[camera_id]
+            return (None if frame is None else frame.copy(), sequence)
 
     def latest_frame(self) -> np.ndarray | None:
         return self.latest_sample()[0]
@@ -326,7 +346,7 @@ class PreviewWindow:
         last_sequence = -1
         try:
             while not stop_event.is_set():
-                frame, sequence = self.latest_sample()
+                frame, sequence = self.latest_display_sample(self.selected_camera_id)
                 now = time.monotonic()
                 if sequence != last_sequence:
                     frames += 1

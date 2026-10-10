@@ -224,6 +224,28 @@ class PiStore:
             for row in rows
         ]
 
+    def recent_recognition_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        """All decisions, independent of attendance cooldown or unknown-image saving."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT event.*,users.student_id FROM recognition_events AS event "
+                "LEFT JOIN users ON users.user_id=event.user_id "
+                "ORDER BY event.observed_at DESC,event.observation_id DESC LIMIT ?",
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+        result = []
+        for row in rows:
+            accepted = row["status"] == "accepted"
+            display = "accepted" if accepted else ("unknown" if row["reason"] in {"no_candidate", "similarity_below_threshold"} else "rejected")
+            result.append({
+                "observation_id": row["observation_id"], "occurred_at": row["observed_at"],
+                "name": row["name"] if accepted else None, "student_id": row["student_id"] if accepted else None,
+                "camera_ids": [row["camera_id"]], "similarity": row["similarity_scaled"] / 10_000,
+                "status": row["status"], "display_status": display,
+                "reason": row["reason"], "model_version": row["model_version"],
+            })
+        return result
+
     def pending_attendance(self, limit: int = 50) -> list[RecognitionDecision]:
         with self._lock:
             rows = self._conn.execute(

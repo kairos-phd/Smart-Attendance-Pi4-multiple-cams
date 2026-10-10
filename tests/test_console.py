@@ -328,7 +328,7 @@ def test_attendance_client_polls_recognitions_with_token(monkeypatch, capsys, op
     monkeypatch.setattr(console.time, "sleep", sleep)
     with pytest.raises(KeyboardInterrupt):
         console.attendance_main(["--token", "secret", "--limit", "7", *options])
-    assert calls == [("http://127.0.0.1:8080/api/recognitions?limit=7", "Bearer secret")] * 2
+    assert calls == [("http://127.0.0.1:8080/api/recognition-events?limit=7", "Bearer secret")] * 2
     assert sleeps == [interval, interval]
     assert capsys.readouterr().out.count("Time | Name | Student ID | Camera | Similarity") == 2
 

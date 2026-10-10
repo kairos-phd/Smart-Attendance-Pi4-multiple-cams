@@ -9,7 +9,7 @@ description = "Realtime biometric-metadata attendance runtime for Raspberry Pi 4
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
-  "firebase-admin>=6.5,<7",
+  "firebase-admin>=6.5,<8",
   "insightface>=0.7.3,<0.8",
   "numpy>=2,<3",
   "onnx>=1.16,<2",
@@ -19,6 +19,8 @@ dependencies = [
   "python-dotenv>=1.0,<2",
   "python-multipart>=0.0.9,<1",
   "uvicorn>=0.30,<1",
+  "aiortc>=1.14,<2",
+  "av>=16,<18",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +31,7 @@ sic-pi4 = "pi4_attendance.service:main"
 sic-pi4-prepare-models = "pi4_attendance.tools.prepare_models:main"
 sic-pi4-benchmark = "pi4_attendance.tools.benchmark:main"
 sic-pi4-embeddings = "pi4_attendance.tools.embeddings:main"
+sic-pi4-model-info = "pi4_attendance.tools.model_info:main"
 sic-pi4-control = "pi4_attendance.tools.console:control_main"
 sic-pi4-performance = "pi4_attendance.tools.console:performance_main"
 sic-pi4-attendance-log = "pi4_attendance.tools.console:attendance_main"
@@ -39,4 +42,3 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

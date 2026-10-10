@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 from collections.abc import Callable
 
@@ -14,7 +15,17 @@ def build_admin_dependency(settings: Settings) -> Callable:
     if settings.api_auth_mode == "firebase":
         assert settings.firebase_service_account is not None
         if not firebase_admin._apps:
-            firebase_admin.initialize_app(credentials.Certificate(str(settings.firebase_service_account)))
+            options = {}
+            if settings.firebase_project_id:
+                options["projectId"] = settings.firebase_project_id
+            database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
+            if database_url:
+                options["databaseURL"] = database_url
+
+            firebase_admin.initialize_app(
+                credentials.Certificate(str(settings.firebase_service_account)),
+                options or None,
+            )
 
         def require_admin(authorization: str | None = Header(default=None)) -> str:
             token = _bearer(authorization)

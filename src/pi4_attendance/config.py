@@ -56,6 +56,8 @@ class Settings:
     firebase_project_id: str | None
     log_level: str
     preview_fps: float = 30.0
+    firebase_database_url: str | None = None
+    recognizer_model: str = "auto"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -102,8 +104,10 @@ class Settings:
             admin_shared_token=os.getenv("ADMIN_SHARED_TOKEN") or None,
             cloud_summary_enabled=_bool("CLOUD_SUMMARY_ENABLED", False),
             firebase_project_id=os.getenv("FIREBASE_PROJECT_ID") or None,
+            firebase_database_url=os.getenv("FIREBASE_DATABASE_URL") or None,
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             preview_fps=float(os.getenv("PREVIEW_FPS", "30")),
+            recognizer_model=os.getenv("RECOGNIZER_MODEL", "auto").strip() or "auto",
         )
         settings.validate()
         return settings

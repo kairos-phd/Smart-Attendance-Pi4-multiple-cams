@@ -228,7 +228,8 @@ def format_performance(health: dict) -> str:
 
 
 def format_attendance(rows: list[dict]) -> str:
-    lines = ["Time | Name | Student ID | Camera | Similarity"]
+    detailed = any('display_status' in row for row in rows)
+    lines = ["Time | Name | Student ID | Camera | Similarity" + (" | Status | Reason | Model" if detailed else "")]
     width, height = shutil.get_terminal_size(fallback=(120, 24))
     remaining = height - 1 - math.ceil(_display_width(lines[0]) / width)
     for row in sorted(rows, key=lambda row: str(row.get("occurred_at") or ""), reverse=True):
@@ -241,10 +242,13 @@ def format_attendance(rows: list[dict]) -> str:
                 occurred_at = timestamp.astimezone().strftime("%Y-%m-%d %H:%M:%S")
         except (TypeError, ValueError, OverflowError, OSError):
             pass
+        name = row.get('name') or ('UNKNOWN' if row.get('display_status') == 'unknown' else 'REJECTED' if row.get('status') == 'rejected' else '-')
         line = (
-            f"{occurred_at} | {row.get('name', '-')} | {row.get('student_id', '-')} | "
+            f"{occurred_at} | {name} | {row.get('student_id') or '-'} | "
             f"{','.join(row.get('camera_ids') or []) or '-'} | {similarity_text}"
         )
+        if detailed:
+            line += f" | {row.get('display_status', row.get('status', '-'))} | {row.get('reason') or '-'} | {row.get('model_version') or '-'}"
         wrap_width = max(1, width - int(any(unicodedata.east_asian_width(char) in {"W", "F"} for char in line)))
         if len(lines) == 1 and remaining > 0 and _display_width(line) > remaining * wrap_width:
             available = remaining * wrap_width - 1
@@ -306,6 +310,7 @@ def attendance_main(argv: list[str] | None = None) -> int:
     parser = _viewer_parser("SIC Pi 4 attendance log")
     parser.add_argument("--token")
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--accepted-only", action="store_true", help="Use legacy accepted-only feed")
     args = parser.parse_args(argv)
     try:
         args.url = require_loopback_url(args.url)
@@ -313,7 +318,7 @@ def attendance_main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     return _viewer(
-        lambda: request_json(args.url, f"/api/recognitions?limit={args.limit}", token=token),
+        lambda: request_json(args.url, f"/api/{'recognitions' if args.accepted_only else 'recognition-events'}?limit={args.limit}", token=token),
         format_attendance,
         args.interval,
         args.once,

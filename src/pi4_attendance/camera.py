@@ -97,8 +97,7 @@ class CameraWorker(threading.Thread):
         return self.settings.monitor_fps
 
     def _configure_capture(self, cap) -> None:
-        if self.preview_fps is not None:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.settings.frame_width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.settings.frame_height)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

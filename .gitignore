@@ -28,3 +28,10 @@ dist/
 htmlcov/
 .coverage
 desktop.ini
+*.bak*
+*.backup*
+*.deb
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+/dmxcc

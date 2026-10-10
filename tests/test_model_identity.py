@@ -29,11 +29,18 @@ def test_face_engine_allows_insightface_to_acquire_pack_before_fingerprinting(tm
         def __init__(self, **_: object) -> None:
             nonlocal constructed
             constructed = True
+            pack = tmp_path / "models" / "pack"
+            pack.mkdir(parents=True)
+            detector, recognizer = pack / "det.onnx", pack / "rec.onnx"
+            detector.write_bytes(b"detector")
+            recognizer.write_bytes(b"recognizer")
+            self.models = {"detection": SimpleNamespace(model_file=str(detector)),
+                           "recognition": SimpleNamespace(model_file=str(recognizer), input_mean=127.5, input_std=127.5)}
 
         def prepare(self, **_: object) -> None:
             return None
 
-    def fingerprint_after_construction(*_: object) -> SimpleNamespace:
+    def fingerprint_after_construction(*_: object, **kwargs: object) -> SimpleNamespace:
         assert constructed
         return SimpleNamespace(label="friendly", compatibility_key="friendly@sha256:abc")
 

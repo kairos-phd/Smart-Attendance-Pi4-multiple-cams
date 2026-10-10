@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, db, firestore
 
 from .config import CameraConfig, Settings
 from .models import RecognitionDecision
@@ -20,8 +21,18 @@ class CloudSummary:
             return
         assert settings.firebase_service_account is not None
         if not firebase_admin._apps:
-            options = {"projectId": settings.firebase_project_id} if settings.firebase_project_id else None
-            firebase_admin.initialize_app(credentials.Certificate(str(settings.firebase_service_account)), options)
+            options = {}
+            if settings.firebase_project_id:
+                options["projectId"] = settings.firebase_project_id
+            database_url = os.getenv("FIREBASE_DATABASE_URL", "").strip()
+            if database_url:
+                options["databaseURL"] = database_url
+
+            firebase_admin.initialize_app(
+                credentials.Certificate(str(settings.firebase_service_account)),
+                options or None,
+            )
+
         self.db = firestore.client()
 
     def camera_status(self, camera: CameraConfig, status: str, error: str | None) -> None:

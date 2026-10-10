@@ -104,6 +104,8 @@ def test_api_server_ignores_forwarded_client_addresses(monkeypatch) -> None:
 
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
     monkeypatch.setattr(uvicorn, "Server", TestServer)
+    # This ASGI test must never start real Firebase signaling on a configured Pi.
+    monkeypatch.setattr("pi4_attendance.webrtc.WebRTCManager", lambda _: (_ for _ in ()).throw(RuntimeError("media disabled in API test")))
 
     runtime._api_loop()
 
