@@ -986,4 +986,7 @@ def create_app(runtime: RuntimeContext) -> FastAPI:
             "status": user_status,
         }
 
+    from .dashboard_feed import add_dashboard_routes
+    add_dashboard_routes(app, runtime, require_admin)
+
     return app
