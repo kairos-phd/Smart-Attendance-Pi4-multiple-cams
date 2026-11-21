@@ -2,7 +2,7 @@
 
 This folder is the self-contained Raspberry Pi 4 deployment for realtime biometric attendance. The Pi performs capture, optional motion triggering, face detection, recognition, enrollment, decision metadata, and biometric storage. A local PC is not part of the runtime path.
 
-For an existing Pi with local source changes, follow [Cập nhật Pi và kiểm kê từng file](docs/PI_UPDATE_AND_FILE_AUDIT.md). It preserves local work, checks the actual model and embedding compatibility, and provides a read-only file inventory before cleanup.
+For an existing Pi with local source changes, follow [Updating the Pi and Per-File Audit](docs/PI_UPDATE_AND_FILE_AUDIT.md). It preserves local work, checks the actual model and embedding compatibility, and provides a read-only file inventory before cleanup.
 
 ## Decision rules
 
@@ -182,4 +182,4 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 Real face images, `.env`, service credentials, generated model packs, SQLite databases, and benchmark results are ignored by Git.
 
-Read [deployment](docs/DEPLOYMENT.md), [recognition policy](docs/VOTING.md), [model optimization](docs/MODEL_OPTIMIZATION.md), [data storage](docs/DATA_STORAGE.md), and [security](docs/SECURITY.md) before installation.
+Read [architecture](docs/ARCHITECTURE.md), [deployment](docs/DEPLOYMENT.md), [recognition policy](docs/VOTING.md), [model optimization](docs/MODEL_OPTIMIZATION.md), [model user migration](docs/MODEL_USER_MIGRATION.md), [data storage](docs/DATA_STORAGE.md), [dashboard feed](docs/PI_DASHBOARD_FEED.md), [log and stream runbook](docs/PI_LOG_STREAM_RUNBOOK.md), [recognition soak](docs/PI_RECOG_SOAK.md), and [security](docs/SECURITY.md) before installation.

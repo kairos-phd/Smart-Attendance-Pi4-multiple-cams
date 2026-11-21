@@ -303,9 +303,7 @@ class AttendanceRuntime:
                     performance.observe("inference_ms", inference_ms)
                     performance.set_gauge("queue.depth", self.frames.qsize())
 
-                # =========================================================
-                # VẼ KHUNG KHUÔN MẶT CHO WEB PREVIEW
-                # =========================================================
+                # Draw face bounding boxes for web/HDMI preview overlay.
                 preview = getattr(self, "preview", None)
 
                 if preview is not None and observations:
@@ -325,9 +323,7 @@ class AttendanceRuntime:
                     # Display annotations must not replace the raw enrollment sample.
                     preview.submit_overlay(candidate.camera_id, preview_frame)
 
-                # =========================================================
-                # XỬ LÝ NHẬN DIỆN NHƯ CŨ
-                # =========================================================
+                # Record observations and evaluate recognition policy decisions.
                 for observation in observations:
                     self.store.record_observation(observation)
                     self._handle_decision(

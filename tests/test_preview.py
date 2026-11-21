@@ -81,7 +81,7 @@ def test_preview_recognition_is_scoped_to_camera_and_expires(monkeypatch) -> Non
 
     preview.show_recognition(
         "camera-2",
-        name="Nguyễn Văn A",
+        name="Example User",
         student_id="S001",
         similarity=0.823,
         timestamp="10:42:18",
@@ -92,7 +92,7 @@ def test_preview_recognition_is_scoped_to_camera_and_expires(monkeypatch) -> Non
     preview.handle_key(ord("2"))
     result = preview.latest_recognition
     assert result is not None
-    assert (result.name, result.student_id, result.similarity) == ("Nguyễn Văn A", "S001", 0.823)
+    assert (result.name, result.student_id, result.similarity) == ("Example User", "S001", 0.823)
     assert (result.timestamp, result.status) == ("10:42:18", "ATTENDANCE RECORDED")
 
     now[0] = 103.01
@@ -152,7 +152,7 @@ def test_switching_to_camera_without_a_frame_clears_stale_image_and_identity(mon
     preview.submit("camera-1", np.zeros((2, 2, 3), dtype=np.uint8))
     preview.show_recognition(
         "camera-1",
-        name="Nguyễn Văn A",
+        name="Example User",
         student_id="S001",
         similarity=0.823,
         timestamp="10:42:18",
@@ -206,7 +206,7 @@ def test_switching_to_camera_without_a_frame_clears_stale_image_and_identity(mon
 
     assert labels[0].configured["image"] == ""
     assert "Camera: camera-2" in labels[1].configured["text"]
-    assert "Nguyễn Văn A" not in labels[1].configured["text"]
+    assert "Example User" not in labels[1].configured["text"]
 
 
 def test_preview_without_desktop_has_clear_error(monkeypatch) -> None:

@@ -1,16 +1,16 @@
-# Giữ registered users khi thay model
+# Preserving Registered Users Across Model Changes
 
-Có thể giữ user ID, student ID và lịch sử điểm danh bằng cách tạo lại embeddings từ ảnh enrollment gốc đã duyệt nhãn. Đổi recognizer hoặc quantize FP32 → INT8 cần chạy ảnh qua recognizer mới; không đổi nhãn `model_version` trong SQL để ép embeddings cũ khớp. Thay detector cũng cần kiểm tra alignment/quality. Chỉ đổi định dạng lưu embedding của cùng model mới có thể chuyển dequantize/requantize mà không inference lại, vẫn cần đánh giá sai số.
+You can preserve existing `user_id`, `student_id`, and attendance history by regenerating embeddings from verified original enrollment images. Changing the recognizer model or quantizing from FP32 to INT8 requires running the enrollment images through the new recognizer; never rewrite the `model_version` column directly in SQL to force old embeddings to match. Replacing the face detector also requires re-verifying landmark alignment and face quality. Only a change in the embedding storage representation for the exact same model can be dequantized and requantized without re-running inference, and its approximation error must still be evaluated.
 
-Hiện source chưa có công cụ migration user ID tự động: enrollment tạo user mới; import catalog không phải update embeddings tại chỗ. Media-only updater không đổi model và không làm migration. Giữ recognizer đang nhận diện được cho đến khi hoàn thành các bước sau:
+The current repository does not provide an automated in-place user ID migration tool: standard enrollment creates a new user record, and catalog `.npz` import does not update embeddings in place while retaining legacy attendance rows. The media-only and dashboard-only updaters leave the model and user catalog untouched. Keep the currently working recognizer active until the following steps are completed:
 
-1. Kiểm kê ảnh enrollment tồn tại, SHA256 đúng và nhãn đã duyệt. User thiếu ảnh phải thu lại ảnh; không tự đoán danh tính.
-2. Dùng model manifest/fingerprint mới và pipeline enrollment để tạo catalog staging. Giữ `user_id`/`student_id`; không insert người trùng.
-3. Đo nhiều người, unknown, nhiều camera, ánh sáng/khoảng cách; calibrate threshold mới bằng dữ liệu có ground truth để đo FAR/FRR. Chỉ đo CPU không đủ chấp nhận model.
-4. Dừng service ngắn; backup SQLite nhất quán và model/config. Trong transaction, chỉ cập nhật embedding, dimension, scale, model version và timestamp/audit; giữ users, ảnh và lịch sử attendance. Kiểm tra catalog đúng fingerprint trước restart.
-5. Nếu không đạt: phục hồi đồng bộ DB + model + config rồi restart. Không chỉ rollback một phía.
+1. Audit that original enrollment images exist on disk, match their recorded SHA-256 checksums, and have verified identity labels. Any user missing valid original images must be re-captured with consent; never guess or infer identities.
+2. Use the new model manifest/fingerprint and the enrollment validation pipeline (`3–8` images per user, single face, detection score `>= 0.60`, face quality `>= 0.35`, same-person consistency `>= 0.55`) to build a staging catalog. Preserve `user_id` and `student_id`; do not insert duplicate users.
+3. Evaluate across multiple registered users, unknown holdout subjects, all configured cameras (`icspring`, `jieli`, `sonix`), and varied lighting/distances. Recalibrate `MATCH_THRESHOLD` and `MATCH_MARGIN` on labeled ground-truth data split by session to measure FAR and FRR. Measuring CPU utilization or file size reduction alone is not sufficient to accept a model change.
+4. Stop the service briefly (`sudo systemctl stop sic-pi4-attendance`) and take a consistent SQLite backup (using the SQLite backup API to capture WAL state) alongside the model and `.env` configuration. Within a single database transaction, update only `embedding_int8`, `embedding_dim`, `embedding_scale`, `model_version`, and `updated_at`/audit metadata while keeping `users`, `enrollment_images`, and `attendance` history intact. Verify that the loaded catalog matches the new model compatibility fingerprint before restarting the service.
+5. If validation fails, restore the database, model files, and configuration together before restarting. Never roll back only one side of the state.
 
-Kiểm kê đọc-only trên Pi (chỉ in số lượng/trạng thái ảnh, không in tên hay nội dung):
+Read-only inventory on the Pi (prints only counts and schema metadata, never personal names or biometric content):
 
 ```bash
 python3 - <<'PY'
@@ -26,4 +26,4 @@ with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
 PY
 ```
 
-Đọc schema thực tế trước khi viết công cụ migration; schema/ảnh trên Pi không được suy ra từ source archive. Bước tiếp theo sau stream là soak 30 phút với model hiện tại, thu ground truth, rồi mới so sánh INT8/model mới. Tiếp theo mới kiểm thử API mất mạng/gửi bù idempotent, công cụ duyệt nhãn và PAD. Thử tại ga sau khi có tiêu chí tải, độ chính xác, xử lý lỗi và quyền riêng tư.
+Inspect the actual on-device SQLite schema before running any migration utility; do not assume the live Pi database or enrollment directory matches an offline source archive. After verifying live streaming and a 30-minute recognition soak with the active model, collect session-separated ground truth before running controlled A/B comparisons against static INT8 or alternative detector/recognizer candidates, followed by offline/outbox retry verification and presentation attack detection (PAD) evaluation.

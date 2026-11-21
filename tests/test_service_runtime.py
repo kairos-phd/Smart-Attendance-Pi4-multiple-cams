@@ -277,14 +277,14 @@ def test_accepted_decision_updates_preview_with_catalog_student_id() -> None:
     runtime = AttendanceRuntime.__new__(AttendanceRuntime)
     observed_at = datetime(2026, 9, 7, 3, 42, 18, tzinfo=timezone.utc)
     decision = RecognitionDecision(
-        "obs-1", "accepted", "u1", "Nguyễn Văn A", "camera-2", observed_at,
+        "obs-1", "accepted", "u1", "Example User", "camera-2", observed_at,
         0.823, 0.1, 0.9, 0.8, (1, 2, 3, 4), "model-v1", "thresholds_passed",
     )
     runtime.settings = SimpleNamespace(attendance_cooldown_seconds=300)
     runtime.store = SimpleNamespace(record_decision_result=lambda *_: (True, "recorded"))
     runtime._cloud_wake = SimpleNamespace(set=lambda: None)
     runtime._embedding_catalog = EmbeddingCatalog.from_users(
-        [RegisteredUser("u1", "Nguyễn Văn A", "S001", np.array([1], dtype=np.int8), 0.1, "model-v1")],
+        [RegisteredUser("u1", "Example User", "S001", np.array([1], dtype=np.int8), 0.1, "model-v1")],
         "model-v1",
     )
     shown = []
@@ -297,7 +297,7 @@ def test_accepted_decision_updates_preview_with_catalog_student_id() -> None:
         (
             "camera-2",
             {
-                "name": "Nguyễn Văn A",
+                "name": "Example User",
                 "student_id": "S001",
                 "similarity": 0.823,
                 "timestamp": observed_at.astimezone().strftime("%H:%M:%S"),
